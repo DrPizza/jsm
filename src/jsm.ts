@@ -614,18 +614,12 @@ async function load_workspace(absolute_file_name: string, target: string, parent
 	if(loaded == null || loaded[0] == null || !(loaded[0] instanceof workspace) || loaded.length != 1) {
 		throw new Error('expected a single workspace definition');
 	}
-	if(parent_workspace) {
-		_.merge(ws, loaded[0]);
-		ws.workspace_directory = path.dirname(absolute_file_name);
-	} else {
-		const all_files = ws.all_files;
-		ws = loaded[0];
-		if(ws == null) {
-			throw new Error('expected a single workspace definition');
-		}
-		ws.all_files = all_files;
-		ws.target_quintet = new quintet(target);
-	}
+	
+	const all_files = ws.all_files;
+	ws = loaded[0];
+	ws.all_files = all_files;
+	ws.target_quintet = new quintet(target);
+	
 	ws.imports = await ws.load_imports();
 	ws.components = await ws.load_components();
 	return ws;
