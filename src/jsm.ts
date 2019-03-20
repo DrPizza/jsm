@@ -71,6 +71,17 @@ class workspace {
 		this.all_files  = new Map<string, any>();
 	}
 
+	calculate_default_target() {
+		// TODO platform dependent
+		let platform      = this.defaults.platform || 'win32';
+		let toolchain     = this.defaults.toolchain || 'msvc';
+		let type          = '*';
+		let architecture  = this.defaults.architecture || 'x64';
+		let configuration = this.defaults.configuration || 'debug';
+		
+		return new quintet(`${platform}:${toolchain}:${type}:${architecture}:${configuration}`);
+	}
+
 	parse(o: any): any {
 		if(!Array.isArray(o)) {
 			o = [o];
@@ -596,7 +607,7 @@ function wrap_in_filter<V>(obj: any): filtered_map<V> {
 	return filtered_map.make<V>(obj);
 }
 
-async function load_workspace(absolute_file_name: string, target: string, parent_workspace?: workspace) {
+async function load_workspace(absolute_file_name: string, target?: string, parent_workspace?: workspace) {
 	var ws = new workspace({ 'name': '' });
 	ws.all_files           = new Map<string, any>();
 	if(parent_workspace) {
@@ -618,14 +629,14 @@ async function load_workspace(absolute_file_name: string, target: string, parent
 	const all_files = ws.all_files;
 	ws = loaded[0];
 	ws.all_files = all_files;
-	ws.target_quintet = new quintet(target);
 	
+	ws.target_quintet = target ? new quintet(target) : ws.calculate_default_target();
 	ws.imports = await ws.load_imports();
 	ws.components = await ws.load_components();
 	return ws;
 }
 
-module.exports.jsm = async function(absolute_file_name: string, target: string) {
+module.exports.jsm = async function(absolute_file_name: string, target?: string) {
 	try {
 		const ws = await load_workspace(absolute_file_name, target);
 		
