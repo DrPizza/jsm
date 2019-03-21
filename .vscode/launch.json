@@ -9,7 +9,7 @@
 			"request": "launch",
 			"name": "Launch Program",
 			"program": "${workspaceFolder}\\index.js",
-			"cwd": "${workspaceFolder}\\..\\cpuid.jsm\\",
+			"cwd": "${workspaceFolder}\\examples\\cpuid\\",
 			"protocol": "inspector"
 		}
 	]

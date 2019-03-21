@@ -7,6 +7,24 @@ var cerealizer = require('../../cerealizer/');
 
 const ser = new cerealizer.cerealizer();
 
+Object.defineProperty(Array.prototype, 'unique', { value: function<T>(compare?: (a: T, b: T) => number): Array<T> {
+	compare = compare || function (l: T, r: T) {
+		return l < r ? -1
+		     : l > r ?  1
+		     :          0;
+	};
+	let limit = this.length;
+	for(let i = 0; i < limit - 1; ) {
+		if(0 == compare(this[i], this[i + 1])) {
+			this.splice(i + 1, 1);
+			--limit;
+		} else {
+			++i;
+		}
+	}
+	return this;
+}});
+
 process.nextTick(() => {
 	let all_classes =
 	[
@@ -38,9 +56,10 @@ class workspace {
 	
 	parent?: workspace;
 
-	known_targets: Map<string, target>;
-	edges        : Map<string, string[]>;
-	build_order  : string[];
+	known_targets  : Map<string, target>;
+	known_externals: Map<string, external_dependency>;
+	edges          : Map<string, string[]>;
+	build_order    : string[];
 
 	all_files: Map<string, any>;
 
@@ -64,9 +83,10 @@ class workspace {
 		this.properties = {};
 		this.extensions = [];
 
-		this.known_targets = new Map<string, target>();
-		this.edges         = new Map<string, string[]>();
-		this.build_order   = [];
+		this.known_targets   = new Map<string, target>();
+		this.known_externals = new Map<string, external_dependency>();
+		this.edges           = new Map<string, string[]>();
+		this.build_order     = [];
 
 		this.all_files  = new Map<string, any>();
 	}
@@ -145,13 +165,17 @@ class workspace {
 	}
 
 	collect_known_targets() {
+		let targs = new Map<string, target>();
 		const chosen_components = this.components.matching_elements(this.target_quintet);
 		chosen_components.map((comp: workspace) => {
-			comp.collect_known_targets();
+			for(let targ of comp.collect_known_targets()) {
+				targs.set(targ[0], targ[1]);
+			}
 			comp.targets.matching_elements(this.target_quintet).map((t: target) => {
-				this.known_targets.set(comp.name + ':' + t.name, t);
+				targs.set(comp.name + ':' + t.name, t);
 			});
 		});
+		return targs;
 	}
 
 	resolve_dependencies() {
@@ -179,7 +203,7 @@ class workspace {
 
 	resolve_all_dependencies(): void {
 		this.fix_physical_locations();
-		this.collect_known_targets();
+		this.known_targets = this.collect_known_targets();
 		this.resolve_dependencies();
 	}
 
@@ -211,7 +235,59 @@ class workspace {
 		});
 	}
 	
-	resolve_all_external_dependencies(): void { // TODO
+	collect_external_dependencies() {
+		let exts = new Map<string, external_dependency>();
+		const chosen_components = this.components.matching_elements(this.target_quintet);
+		chosen_components.map((comp: workspace) => {
+			for(let ext of comp.collect_external_dependencies()) {
+				exts.set(ext[0], ext[1]);
+			}
+			comp.targets.matching_elements(this.target_quintet).map((t: target) => {
+				t.external_deps.matching_elements(this.target_quintet).map((e: external_dependency) => {
+					const key = `${e.name}::${e.version}`;
+					if(!exts.has(key)) {
+						exts.set(key, ser.clone(e));
+					} else {
+						const existing = exts.get(key)!;
+						const copy = ser.clone(e) as external_dependency;
+						existing.providers = filtered_map.merge(existing.providers, copy.providers);
+						exts.delete(key);
+						exts.set(key, existing);
+					}
+				});
+			});
+		});
+		console.log(`fused external dependencies: ${util.inspect(exts, true, 4, true)}`);
+		return exts;
+	}
+	
+	resolve_all_external_dependencies(): void {
+		this.known_externals = this.collect_external_dependencies();
+		
+		let host_env = {
+			lookup: (s: string) => {
+				switch(s) {
+				case 'target':
+					return this.target_quintet.as_raw_string();
+				case 'vcpkg.triple':
+					return 'x64-windows-static';
+				case 'vcpkg.root':
+					return 'c:/code/projects/vcpkg/';
+				}
+			}
+		};
+		
+		this.known_externals.forEach((dep: external_dependency) => {
+			this.extensions.forEach((ext: extension) => {
+				console.log(`attempting to resolve ${dep.name} using extension ${ext.name}`);
+				let resolution = ext.resolve(host_env, dep, this.target_quintet);
+				if(resolution) {
+					console.log(`resolved to ${util.inspect(resolution)}`);
+				} else {
+					console.log(`could not be resolved`);
+				}
+			});
+		});
 	}
 
 	async load_component(component: string): Promise<workspace> {
@@ -309,6 +385,20 @@ class quintet {
 
 	as_raw_string(): string {
 		return [this.platform, this.toolchain, this.type, this.arch, this.configuration].join(':');
+	}
+	
+	static compare(l: quintet, r: quintet) : number {
+		return l.platform      < r.platform      ? -1
+		     : l.platform      > r.platform      ?  1
+		     : l.toolchain     < r.toolchain     ? -1
+		     : l.toolchain     > r.toolchain     ?  1
+		     : l.type          < r.type          ? -1
+		     : l.type          > r.type          ?  1
+		     : l.arch          < r.arch          ? -1
+		     : l.arch          > r.arch          ?  1
+		     : l.configuration < r.configuration ? -1
+		     : l.configuration > r.configuration ?  1 
+		     :                                      0;
 	}
 }
 
@@ -501,11 +591,14 @@ function make_target(obj: any): target {
 
 class extension {
 	name   : string;
-	resolve: string; //(ext: external_dependency) => any;
+	language: string;
+	// TODO: different types of extension that offer different verbs
+	resolve: (env: any, ext: external_dependency, target: quintet) => any;
 
 	constructor(spec: any) {
-		this.name    = spec.name;
-		this.resolve = spec.resolve.toString();
+		this.name     = spec.name;
+		this.language = spec.language || 'javascript';
+		this.resolve  = spec.resolve;
 	}
 }
 
@@ -519,11 +612,13 @@ class external_dependency {
 	name   : string;
 	version: string;
 	type   : string;
+	providers : filtered_map<string>;
 
 	constructor(spec: any) {
 		this.name    = spec.name;
 		this.version = spec.version;
 		this.type    = spec.type;
+		this.providers = wrap_in_filter<string>(spec.providers);
 	}
 }
 
@@ -538,6 +633,26 @@ class filtered_map<V> extends Map<quintet, V[]> {
 		return new filtered_map<V>(Array.from(Object.entries(spec)).map((value: [string, V[]]) => {
 			return [new quintet(value[0]), value[1]] as [quintet, V[]];
 		}));
+	}
+	
+	static merge<V>(a: filtered_map<V>, b: filtered_map<V>): filtered_map<V> {
+		let combined = [...a, ...b].sort((l, r) => {
+			return quintet.compare(l[0], r[0]);
+		});
+		let limit = combined.length;
+		for(let i = 0; i < limit - 1;) {
+			if(0 == quintet.compare(combined[i][0], combined[i + 1][0])) {
+				let combi = [...combined[i][1], ...combined[i + 1][1]].sort();
+				//@ts-ignore
+				combi = combi.unique();
+				combined[i][1] = combi;
+				combined.splice(i + 1, 1);
+				--limit;
+			} else {
+				++i;
+			}
+		}
+		return new filtered_map<V>(combined);
 	}
 
 	constructor(...args: any) {
@@ -591,7 +706,7 @@ function wrap_in_filter<V>(obj: any): filtered_map<V> {
 			'*:*:*:*:*': []
 		};
 	}
-	if(obj instanceof filespec) {
+	if(typeof obj === 'string' || obj instanceof filespec) {
 		obj = [obj];
 	}
 	if(Array.isArray(obj)) {
@@ -644,9 +759,8 @@ module.exports.jsm = async function(absolute_file_name: string, target?: string)
 		ws.determine_build_order();
 		ws.resolve_all_external_dependencies();
 
-		// console.log(util.inspect(ws.known_targets, false, 4, true));
-		console.log(util.inspect(ws, false, 4, true));
-		console.log(ws.build_order);
+//		console.log(util.inspect(ws, false, 4, true));
+//		console.log(ws.build_order);
 		return ws;
 	} catch(e) {
 		console.log(`exception: ${e}`);
