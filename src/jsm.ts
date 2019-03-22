@@ -7,29 +7,35 @@ var cerealizer = require('../../cerealizer/');
 
 const ser = new cerealizer.cerealizer();
 
-Object.defineProperty(Array.prototype, 'unique', { value: function<T>(compare?: (a: T, b: T) => number): Array<T> {
-	compare = compare || function (l: T, r: T) {
-		return l < r ? -1
-		     : l > r ?  1
-		     :          0;
-	};
-	let limit = this.length;
-	for(let i = 0; i < limit - 1; ) {
-		if(0 == compare(this[i], this[i + 1])) {
-			this.splice(i + 1, 1);
-			--limit;
-		} else {
-			++i;
+Object.defineProperty(Array.prototype, 'unique', {
+	value: function<T>(compare?: (a: T, b: T) => number, fuse?: (a: T, b: T) => T): Array<T> {
+		compare = compare || function (l: T, r: T) {
+			return l < r ? -1
+			     : l > r ?  1
+			     :          0;
+		};
+		fuse = fuse || function(l: T, r: T) {
+			return l;
+		};
+		let limit = this.length;
+		for(let i = 0; i < limit - 1; ) {
+			if(0 == compare(this[i], this[i + 1])) {
+				this[i] = fuse(this[i], this[i + 1]);
+				this.splice(i + 1, 1);
+				--limit;
+			} else {
+				++i;
+			}
 		}
+		return this;
 	}
-	return this;
-}});
+});
 
 process.nextTick(() => {
 	let all_classes =
 	[
-		archiver, compiler, dynamic_library, executable, extension, external_dependency, filespec, filtered_map, header_only, linker, quintet, static_library,
-		target, target_reference, tool, toolchain, workspace, Map
+		archiver, compiler, dynamic_library, executable, extension, external_dependency, filespec, filtered_map, header_only, linker, quintet_part, quintet,
+		static_library, target, target_reference, tool, toolchain, workspace, Map
 	];
 	all_classes.map(clazz => {
 		ser.make_class_serializable(clazz);
@@ -94,7 +100,7 @@ class workspace {
 	calculate_default_target() {
 		// TODO platform dependent
 		let platform      = this.defaults.platform || 'win32';
-		let toolchain     = this.defaults.toolchain || 'msvc';
+		let toolchain     = this.defaults.toolchain || 'msvc/static';
 		let type          = '*';
 		let architecture  = this.defaults.architecture || 'x64';
 		let configuration = this.defaults.configuration || 'debug';
@@ -246,18 +252,17 @@ class workspace {
 				t.external_deps.matching_elements(this.target_quintet).map((e: external_dependency) => {
 					const key = `${e.name}::${e.version}`;
 					if(!exts.has(key)) {
-						exts.set(key, ser.clone(e));
+						exts.set(key, e);
 					} else {
 						const existing = exts.get(key)!;
-						const copy = ser.clone(e) as external_dependency;
-						existing.providers = filtered_map.merge(existing.providers, copy.providers);
+						existing.providers.merge(e.providers);
+						e.providers = existing.providers;
 						exts.delete(key);
 						exts.set(key, existing);
 					}
 				});
 			});
 		});
-		console.log(`fused external dependencies: ${util.inspect(exts, true, 4, true)}`);
 		return exts;
 	}
 	
@@ -265,29 +270,44 @@ class workspace {
 		this.known_externals = this.collect_external_dependencies();
 		
 		let host_env = {
-			lookup: (s: string) => {
+			lookup: (s: string, dflt?: string) => {
 				switch(s) {
 				case 'target':
 					return this.target_quintet.as_raw_string();
-				case 'vcpkg.triple':
-					return 'x64-windows-static';
-				case 'vcpkg.root':
-					return 'c:/code/projects/vcpkg/';
+				default:
+					if(this.properties.hasOwnProperty(s)) {
+						return this.properties[s];
+					} else if(dflt) {
+						return dflt;
+					} else {
+						throw new Error(`could not find property ${s}`);
+					}
 				}
 			}
 		};
 		
 		this.known_externals.forEach((dep: external_dependency) => {
+			const provs = dep.providers.matching_elements(this.target_quintet);
 			this.extensions.forEach((ext: extension) => {
-				console.log(`attempting to resolve ${dep.name} using extension ${ext.name}`);
-				let resolution = ext.resolve(host_env, dep, this.target_quintet);
-				if(resolution) {
-					console.log(`resolved to ${util.inspect(resolution)}`);
-				} else {
-					console.log(`could not be resolved`);
+				if(provs.some((prov: string) => { return prov == ext.name || prov == '*'; })) {
+					let resolution = ext.resolve(host_env, dep, this.target_quintet);
+					if(resolution) {
+						dep.resolution = Object.assign(new external_resolution(), resolution);
+					}
 				}
 			});
 		});
+		let missing : string[] = [];
+		this.known_externals.forEach((dep: external_dependency) => {
+			if(dep.resolution === null) {
+				if(!dep.optional) {
+					missing.push(`${dep.name}::${dep.version}`);
+				}
+			}
+		});
+		if(missing.length > 0) {
+			throw new Error(`unresolved dependencies: ${missing}`);
+		}
 	}
 
 	async load_component(component: string): Promise<workspace> {
@@ -326,8 +346,8 @@ class workspace {
 	}
 
 	async load_components() {
-		return await this.component_names.transform_matching_elements(this.target_quintet, async (elem: string) => {
-			return await this.load_component(elem);
+		return this.component_names.transform_matching_elements(this.target_quintet, async (elem: string) => {
+			return this.load_component(elem);
 		});
 	}
 }
@@ -353,52 +373,93 @@ Object.defineProperty(Array.prototype, 'except', { value: function(exceptions: s
 	return new filespec(this, exceptions);
 } });
 
+class quintet_part {
+	major: string;
+	minor: string;
+	parts: string[];
+	
+	constructor(part: string) {
+		this.parts = part.split('/');
+		if(this.parts.length > 2) {
+			throw new Error(`bad quintet fragment: ${part}`);
+		}
+		this.major = this.parts[0];
+		this.minor = this.parts.length == 2 ? this.parts[1] : '*';
+	}
+	
+	match(rhs: quintet_part) : boolean {
+		if(this.major == '*' || rhs.major == '*') {
+			return true;
+		}
+		if(this.major == rhs.major) {
+			if(this.minor == '*' || rhs.minor == '*') {
+				return true;
+			}
+			return this.minor == rhs.minor;
+		}
+		return false;
+	}
+	
+	as_raw_string(): string {
+		return this.parts.join('/');
+	}
+	
+	toString() : string { return this.as_raw_string(); }
+	
+	static compare(l: quintet_part, r: quintet_part) : number {
+		const sl = l.as_raw_string(), sr = r.as_raw_string();
+		return sl < sr ? -1
+		     : sl > sr ?  1
+		     :            0;
+	}
+}
+
 class quintet {
-	platform     : string;
-	toolchain    : string;
-	type         : string;
-	arch         : string;
-	configuration: string;
+	platform     : quintet_part;
+	toolchain    : quintet_part;
+	type         : quintet_part;
+	arch         : quintet_part;
+	configuration: quintet_part;
+	parts        : quintet_part[];
 
 	constructor(quin: string) {
-		const parts = quin.toString().split(':');
-		if(parts.length != 5) {
+		let raw_parts = quin.toString().split(':');
+		if(raw_parts.length != 5) {
 			throw new Error(`bad quintet: ${quin.toString()}`);
 		}
-		this.platform = parts[0];
-		this.toolchain = parts[1];
-		this.type = parts[2];
-		this.arch = parts[3];
-		this.configuration = parts[4];
+		this.parts = raw_parts.map((p: string) => {
+			return new quintet_part(p);
+		});
+		this.platform      = this.parts[0];
+		this.toolchain     = this.parts[1];
+		this.type          = this.parts[2];
+		this.arch          = this.parts[3];
+		this.configuration = this.parts[4];
 	}
 
 	match(rhs: quintet): boolean {
-		const check = function(left: string, right: string) {
-			return left === right || left == '*' || right == '*';
+		for(let i = 0; i < 5; ++i) {
+			if(!this.parts[i].match(rhs.parts[i])) {
+				return false;
+			}
 		}
-		return check(this.platform, rhs.platform)
-			&& check(this.toolchain, rhs.toolchain)
-			&& check(this.type, rhs.type)
-			&& check(this.arch, rhs.arch)
-			&& check(this.configuration, rhs.configuration);
+		return true;
 	}
 
 	as_raw_string(): string {
-		return [this.platform, this.toolchain, this.type, this.arch, this.configuration].join(':');
+		return this.parts.map((p: quintet_part) => { return p.as_raw_string(); }).join(':');
 	}
 	
+	toString() : string { return this.as_raw_string(); }
+	
 	static compare(l: quintet, r: quintet) : number {
-		return l.platform      < r.platform      ? -1
-		     : l.platform      > r.platform      ?  1
-		     : l.toolchain     < r.toolchain     ? -1
-		     : l.toolchain     > r.toolchain     ?  1
-		     : l.type          < r.type          ? -1
-		     : l.type          > r.type          ?  1
-		     : l.arch          < r.arch          ? -1
-		     : l.arch          > r.arch          ?  1
-		     : l.configuration < r.configuration ? -1
-		     : l.configuration > r.configuration ?  1 
-		     :                                      0;
+		for(let i = 0; i < 5; ++i) {
+			let cmp = quintet_part.compare(l.parts[i], r.parts[i]);
+			if(cmp != 0) {
+				return cmp;
+			}
+		}
+		return 0;
 	}
 }
 
@@ -608,17 +669,27 @@ function add_extension(ws: workspace, obj: any) {
 	return ext;
 }
 
+class external_resolution {
+	headers?: filtered_map<string>;
+	lib?: filtered_map<string>;
+	bin?: filtered_map<string>;
+}
+
 class external_dependency {
-	name   : string;
-	version: string;
-	type   : string;
+	name      : string;
+	version   : string;
+	type      : string;
 	providers : filtered_map<string>;
+	optional  : boolean;
+	resolution: external_resolution | null;
 
 	constructor(spec: any) {
-		this.name    = spec.name;
-		this.version = spec.version;
-		this.type    = spec.type;
-		this.providers = wrap_in_filter<string>(spec.providers);
+		this.name       = spec.name;
+		this.version    = spec.version;
+		this.type       = spec.type;
+		this.optional   = (spec.optional === undefined) ? false : spec.optional;
+		this.providers  = wrap_in_filter<string>(spec.providers);
+		this.resolution = null;
 	}
 }
 
@@ -636,27 +707,28 @@ class filtered_map<V> extends Map<quintet, V[]> {
 	}
 	
 	static merge<V>(a: filtered_map<V>, b: filtered_map<V>): filtered_map<V> {
-		let combined = [...a, ...b].sort((l, r) => {
-			return quintet.compare(l[0], r[0]);
-		});
-		let limit = combined.length;
-		for(let i = 0; i < limit - 1;) {
-			if(0 == quintet.compare(combined[i][0], combined[i + 1][0])) {
-				let combi = [...combined[i][1], ...combined[i + 1][1]].sort();
-				//@ts-ignore
-				combi = combi.unique();
-				combined[i][1] = combi;
-				combined.splice(i + 1, 1);
-				--limit;
-			} else {
-				++i;
-			}
-		}
-		return new filtered_map<V>(combined);
+		return new filtered_map<V>(a.entries()).merge(b);
 	}
 
 	constructor(...args: any) {
 		super(...args);
+	}
+
+	merge(b: filtered_map<V>) {
+		let comparison = (l: [quintet, V[]], r: [quintet, V[]]) : number => {
+			return quintet.compare(l[0], r[0]);
+		};
+		let fuse = (l: [quintet, V[]], r: [quintet, V[]]) : V[] => {
+			//@ts-ignore
+			return [l[0], [...l[1], ...r[1]].sort().unique()];
+		};
+		// @ts-ignore
+		let combined = [...this, ...b].sort(comparison).unique(comparison, fuse);
+		this.clear();
+		combined.forEach((value: [quintet, V[]]) => {
+			this.set(value[0], value[1]);
+		});
+		return this;
 	}
 
 	matching_elements(quin: quintet): V[] {
@@ -754,13 +826,16 @@ async function load_workspace(absolute_file_name: string, target?: string, paren
 module.exports.jsm = async function(absolute_file_name: string, target?: string) {
 	try {
 		const ws = await load_workspace(absolute_file_name, target);
-		
+
 		ws.resolve_all_dependencies();
 		ws.determine_build_order();
 		ws.resolve_all_external_dependencies();
 
-//		console.log(util.inspect(ws, false, 4, true));
-//		console.log(ws.build_order);
+// console.log('after dependency resolution');
+// console.log(util.inspect(ws, false, 12, true));
+
+		console.log(ws.build_order);
+		console.log(ws.known_externals);
 		return ws;
 	} catch(e) {
 		console.log(`exception: ${e}`);

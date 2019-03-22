@@ -3,10 +3,12 @@
 	'name': '//cpuid-master',
 	'imports': [
 		'builtin://defaults.jsm',
-		'builtin://msvc.jsm',
-		'builtin://plugins/vcpkg.jsm'
+		'builtin://plugins/msvc.jsm',
+		'builtin://plugins/vcpkg.jsm',
+		'file://vcpkg.properties.jsm'
 	],
 	'defaults': {
+		'kind': 'properties',
 		'configuration': 'debug',
 		'architecture': 'x64',
 		'targets': ['cpuid'],
