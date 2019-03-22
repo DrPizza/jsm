@@ -32,8 +32,8 @@
 		},
 	},
 	'components': [
+		'file://cpuid/build.jsm',
 		'file://libcpuid/build.jsm',
 		'file://docopt/build.jsm',
-		'file://cpuid/build.jsm'
 	]
 }

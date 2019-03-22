@@ -38,9 +38,9 @@ const handler = {
 		const levels = Reflect.get(target, 'levels');
 		const fn_names = Array.from(Object.keys(levels));
 		if(typeof p === 'string') {
-			const si = get_call_location();
-			const filename = `${si['file']}:${si['line']}:${si['pos']}`;
-			const fn = si['method'];
+			const call_info = get_call_location();
+			const filename = `${call_info['file']}:${call_info['line']}:${call_info['pos']}`;
+			const fn = call_info['method'];
 			const tid = worker.threadId;
 			if(fn_names.includes(p)) {
 				return function(message: string) {
@@ -66,11 +66,11 @@ const logger = new Proxy(winston.createLogger({
 		new winston.transports.Console({
 			level: 'silly',
 			format: winston.format.combine(
-				winston.format.colorize({ level: true }),
+				winston.format.colorize({ all: true }),
 				winston.format.prettyPrint({ colorize: true }),
-				winston.format.timestamp({ format: "YYYY-MM-DD HH:MM:ss" }),
+				winston.format.timestamp(),
 				winston.format.printf((info) => {
-					return `${info.level} ${info.timestamp} ${info.filename} (${info.tid}:${info.func}): ${info.message}`;
+					return (`[` + `${info.level}`.padStart(18) + ' ]' + ` ${info.timestamp}: ${info.message}`).padEnd(180) + `(at ${info.filename} (${info.tid}:${info.func}))`;
 				}),
 			)
 		}),
@@ -82,7 +82,7 @@ const logger = new Proxy(winston.createLogger({
 				winston.format.prettyPrint({ colorize: false }),
 				winston.format.timestamp({ format: "YYYY-MM-DD HH:MM:ss" }),
 				winston.format.printf((info) => {
-					return `${info.level} ${info.timestamp} ${info.filename} (${info.tid}:${info.func}): ${info.message}`;
+					return `${info.level} ${info.timestamp}: ${info.message} (at ${info.filename} (${info.tid}:${info.func}))`;
 				}),
 			)
 		})
@@ -121,12 +121,13 @@ function unique<T>(arr: T[], compare?: (a: T, b: T) => number, fuse?: (a: T, b: 
 process.nextTick(() => {
 	let all_classes =
 	[
-		archiver, compiler, dynamic_library, executable, extension, external_dependency, filespec, filtered_map, header_only, linker, quintet_part, quintet,
-		static_library, target, target_reference, tool, toolchain, workspace, Map
+		archiver, compiler, dynamic_library, executable, extension, external_dependency, external_resolution, filespec, filtered_map, header_only, linker,
+		static_library, target, target_reference, tool, toolchain, workspace
 	];
 	all_classes.map(clazz => {
 		ser.make_class_serializable(clazz);
 	});
+	ser.make_class_serializable(quintet, undefined, quintet.serialize, quintet.deserialize);
 });
 
 class workspace {
@@ -149,9 +150,8 @@ class workspace {
 	
 	parent?: workspace;
 
-	known_targets  : Map<string, target>;
-	edges          : Map<string, string[]>;
-	build_order    : string[];
+	edges          : Map<target, target[]>;
+	build_order    : target[];
 
 	all_files: Map<string, any>;
 
@@ -164,6 +164,7 @@ class workspace {
 		this.component_names = wrap_in_filter<string>(obj.components || []);
 		this.components      = wrap_in_filter<any>([]);
 		this.targets         = wrap_in_filter<target>(obj.targets || []).transform_all_elements_sync(make_target);
+		this.targets.matching_elements(quintet.wildcard).forEach((t: target) => { t.parent = this; });
 
 		this.root_directory      = process.cwd();
 		this.jsm_directory       = __dirname;
@@ -175,8 +176,7 @@ class workspace {
 		this.properties = {};
 		this.extensions = [];
 
-		this.known_targets   = new Map<string, target>();
-		this.edges           = new Map<string, string[]>();
+		this.edges           = new Map<target, target[]>();
 		this.build_order     = [];
 
 		this.all_files  = new Map<string, any>();
@@ -245,71 +245,64 @@ class workspace {
 		}
 	}
 
-	fix_physical_locations() {
-		const chosen_components = this.components.matching_elements(this.target_quintet);
-		chosen_components.map((comp: workspace) => {
-			comp.targets.matching_elements(this.target_quintet).map((t: target) => {
-				t.parent = comp;
-				t.physical_location = comp.workspace_directory;
-			});
-			comp.fix_physical_locations();
-		});
-	}
+	resolve_dependencies(root: workspace, known_targets : Map<string, target>, padding: string = '') {
+		logger.verbose(`${padding}resolving dependencies for component ${this.name}`);
+		
+		this.targets.matching_elements(root.target_quintet).map((t: target) => {
+			t.depends.matching_elements(root.target_quintet).map((r: target_reference) => {
+				const k = r.component_name + ':' + r.target_name;
+				logger.verbose(`${padding}  ${t.name} depends on ${k}`);
+				if(known_targets.has(k)) {
+					logger.verbose(`${padding}    found suitable build target for ${k}`);
+					r.target = known_targets.get(k)!;
 
-	collect_known_targets() {
-		let targs = new Map<string, target>();
-		const chosen_components = this.components.matching_elements(this.target_quintet);
-		chosen_components.map((comp: workspace) => {
-			for(let targ of comp.collect_known_targets()) {
-				targs.set(targ[0], targ[1]);
-			}
-			comp.targets.matching_elements(this.target_quintet).map((t: target) => {
-				targs.set(comp.name + ':' + t.name, t);
-			});
-		});
-		return targs;
-	}
-
-	resolve_dependencies() {
-		const chosen_components = this.components.matching_elements(this.target_quintet);
-		chosen_components.map((comp: workspace) => {
-			comp.resolve_dependencies();
-
-			comp.targets.matching_elements(this.target_quintet).map((t: target) => {
-				t.depends.matching_elements(this.target_quintet).map((r: target_reference) => {
-					const k = r.component_name + ':' + r.target_name;
-					if(this.known_targets.has(k)) {
-						r.target = this.known_targets.get(k)!;
-
-						if(!this.edges.has(k)) {
-							this.edges.set(k, []);
-						}
-						this.edges.get(k)!.push(comp.name + ':' + t.name);
-					} else {
-						throw new Error(`target ${t.name} depends on ${k} which could not be resolved`);
+					if(!root.edges.has(r.target)) {
+						root.edges.set(r.target, []);
 					}
-				});
+					root.edges.get(r.target)!.push(t);
+				} else {
+					throw new Error(`target ${t.name} depends on ${k} which could not be resolved`);
+				}
 			});
+		});
+		
+		this.components.matching_elements(root.target_quintet).map((comp: workspace) => {
+			comp.resolve_dependencies(root, known_targets, padding + '    ');
 		});
 	}
 
-	resolve_all_dependencies(): void {
-		this.fix_physical_locations();
-		this.known_targets = this.collect_known_targets();
-		this.resolve_dependencies();
+	resolve_all_dependencies() {
+		const root = this;
+		let collect_known_targets = function(ws: workspace) {
+			let targs = new Map<string, target>();
+			ws.targets.matching_elements(root.target_quintet).map((t: target) => {
+				targs.set(ws.name + ':' + t.name, t);
+			});
+		
+			ws.components.matching_elements(root.target_quintet).map((comp: workspace) => {
+				for(let targ of collect_known_targets(comp)) {
+					targs.set(targ[0], targ[1]);
+				}
+			});
+			return targs;
+		}
+	
+		let known_targets = collect_known_targets(this);
+		this.resolve_dependencies(this, known_targets);
+		return known_targets;
 	}
 
-	determine_build_order() {
-		this.known_targets.forEach((t: target, k: string) => {
-			if(!this.edges.has(k)) {
-				this.edges.set(k, [] as string[]);
+	determine_build_order(known_targets : Map<string, target>) {
+		known_targets.forEach((t: target, k: string) => {
+			if(!this.edges.has(t)) {
+				this.edges.set(t, []);
 			}
 		});
 
-		const visited  = new Set<string>();
-		const visiting = new Set<string>();
-		var visit :(n:string) => void;
-		visit = (n: string) => {
+		const visited  = new Set<target>();
+		const visiting = new Set<target>();
+		var visit : (n:target) => void;
+		visit = (n: target) => {
 			if(visiting.has(n)) {
 				throw new Error(`${n} is part of a cyclic dependency`);
 			}
@@ -322,9 +315,10 @@ class workspace {
 			visiting.delete(n);
 			this.build_order = [n].concat(this.build_order);
 		};
-		this.edges.forEach((value: string[], key: string) => {
+		this.edges.forEach((value: target[], key: target) => {
 			visit(key);
 		});
+		return this.build_order;
 	}
 	
 	resolve_all_external_dependencies(): void {
@@ -347,33 +341,44 @@ class workspace {
 		
 		let cache = new Map<string, external_dependency>();
 		let root = this;
-		const resolve_externals = function(ws: workspace) {
-			const chosen_components = ws.components.matching_elements(ws.target_quintet);
-			chosen_components.map((comp: workspace) => {
-				resolve_externals(comp);
-				comp.targets.matching_elements(root.target_quintet).map((t: target) => {
-					t.external_deps.matching_elements(root.target_quintet).map((e: external_dependency) => {
-						if(e.resolution === null) {
-							let provs = e.providers.matching_elements(root.target_quintet);
-							provs.map((p: string) => {
-								const key = `${p}::${e.name}::${e.version}`;
-								if(cache.has(key)) {
-									e.resolution = cache.get(key)!.resolution;
-								} else {
-									root.extensions.forEach((ext: extension) => {
-										if(provs.some((prov: string) => { return prov == ext.name || prov === '*'; })) {
-											let resolution = ext.resolve(host_env, e, root.target_quintet);
-											if(resolution) {
-												e.resolution = Object.assign(new external_resolution(), resolution);
-											}
+		const resolve_externals = function(ws: workspace, padding : string = '') {
+			logger.verbose(`${padding}resolving externals for component ${ws.name}`);
+			
+			ws.targets.matching_elements(root.target_quintet).map((t: target) => {
+				t.external_deps.matching_elements(root.target_quintet).map((e: external_dependency) => {
+					logger.verbose(`${padding}  ${t.name} depends on ${e.name}`);
+					if(e.resolution === null) {
+						let provs = e.providers.matching_elements(root.target_quintet);
+						provs.map((p: string) => {
+							const key = `${p}::${e.name}::${e.version}`;
+							if(cache.has(key)) {
+								e.resolution = cache.get(key)!.resolution;
+								logger.verbose(`${padding}    ${key} for ${t.name} in ${ws.name} resolved from cache`);
+							} else {
+								root.extensions.forEach((ext: extension) => {
+									if(!e.resolution && (ext.name == p || p == '*')) {
+										let resolution = ext.resolve(host_env, e, root.target_quintet);
+										if(resolution) {
+											logger.verbose(`${padding}    ${key} for ${t.name} in ${ws.name} resolved by ${ext.name}`);
+											e.resolution = Object.assign(new external_resolution(), resolution);
+										} else {
+											logger.warn(`${padding}    ${key} for ${t.name} in ${ws.name} not resolved by ${ext.name}`);
 										}
-									});
+									}
+								});
+								if(e.resolution) {
 									cache.set(key, e);
+								} else {
+									logger.warn(`${padding}    ${key} for ${t.name} in ${ws.name} was not fulfilled`);
 								}
-							});
-						}
-					});
+							}
+						});
+					}
 				});
+			});
+			
+			ws.components.matching_elements(ws.target_quintet).map((comp: workspace) => {
+				resolve_externals(comp, padding + '    ');
 			});
 		}
 		resolve_externals(root);
@@ -407,11 +412,13 @@ class workspace {
 			return `${value[0].name}/${value[1].name} has unresolved optional external dependency ${value[2].name}::${value[2].version}`
 			     + ` from ${value[2].providers.matching_elements(root.target_quintet)}`;
 		}).join('\n');
-
-		logger.warn(warning_message);
-		logger.error(error_message);
+	
+		if(warning_message !== '') {
+			logger.warn(warning_message);
+		}
 
 		if(error_message !== '') {
+			logger.error(error_message);
 			throw new Error(error_message);
 		}
 	}
@@ -452,7 +459,7 @@ class workspace {
 	}
 
 	async load_components() {
-		return this.component_names.transform_matching_elements(this.target_quintet, async (elem: string) => {
+		return await this.component_names.transform_matching_elements(this.target_quintet, async (elem: string) => {
 			return this.load_component(elem);
 		});
 	}
@@ -522,11 +529,6 @@ class quintet_part {
 }
 
 class quintet {
-	platform     : quintet_part;
-	toolchain    : quintet_part;
-	type         : quintet_part;
-	arch         : quintet_part;
-	configuration: quintet_part;
 	parts        : quintet_part[];
 
 	constructor(quin: string) {
@@ -537,12 +539,13 @@ class quintet {
 		this.parts = raw_parts.map((p: string) => {
 			return new quintet_part(p);
 		});
-		this.platform      = this.parts[0];
-		this.toolchain     = this.parts[1];
-		this.type          = this.parts[2];
-		this.arch          = this.parts[3];
-		this.configuration = this.parts[4];
 	}
+
+	get platform      () { return this.parts[0]; }
+	get toolchain     () { return this.parts[1]; }
+	get type          () { return this.parts[2]; }
+	get arch          () { return this.parts[3]; }
+	get configuration () { return this.parts[4]; }
 
 	match(rhs: quintet): boolean {
 		for(let i = 0; i < 5; ++i) {
@@ -576,6 +579,18 @@ class quintet {
 		}
 		return 0;
 	}
+
+	static serialize(q: quintet) {
+		return [ q.as_raw_string(), false];
+	}
+	
+	static deserialize(structured: quintet, destructured: any) {
+		let q = new quintet(destructured as string);
+		structured.parts = q.parts;
+		return false;
+	}
+
+	static wildcard : quintet = new quintet('*:*:*:*:*');
 }
 
 class tool {
@@ -699,7 +714,6 @@ class target {
 	depends           : filtered_map<target_reference>;
 	external_deps     : filtered_map<external_dependency>;
 	parent           !: workspace;
-	physical_location!: string;
 
 	constructor(spec: any) {
 		var options = {
@@ -722,9 +736,6 @@ class target {
 		this.srcs             = wrap_in_filter<string | filespec>(options.srcs);
 		this.depends          = wrap_in_filter<string>(options.depends)      .transform_all_elements_sync(create_regular_object(target_reference   ));
 		this.external_deps    = wrap_in_filter<string>(options.external_deps).transform_all_elements_sync(create_regular_object(external_dependency));
-
-//		this.parent           = parent;
-//		this.physical_location = location;
 	}
 }
 
@@ -868,7 +879,7 @@ class filtered_map<V> extends Map<quintet, V[]> {
 	}
 
 	async transform_all_elements<U>(fn: (elem: V) => Promise<U>) {
-		return await this.transform_matching_elements(new quintet('*:*:*:*:*'), fn);
+		return await this.transform_matching_elements(quintet.wildcard, fn);
 	}
 	
 	transform_matching_elements_sync<U>(quin: quintet, fn: (elem: V) => U): filtered_map<U> {
@@ -884,14 +895,14 @@ class filtered_map<V> extends Map<quintet, V[]> {
 	}
 
 	transform_all_elements_sync<U>(fn: (elem: V) => U): filtered_map<U> {
-		return this.transform_matching_elements_sync(new quintet('*:*:*:*:*'), fn);
+		return this.transform_matching_elements_sync(quintet.wildcard, fn);
 	}
 }
 
 function wrap_in_filter<V>(obj: any): filtered_map<V> {
 	if(obj === undefined) {
 		obj = {
-			'*:*:*:*:*': []
+			[quintet.wildcard.as_raw_string()]: []
 		};
 	}
 	if(typeof obj === 'string' || obj instanceof filespec) {
@@ -899,7 +910,7 @@ function wrap_in_filter<V>(obj: any): filtered_map<V> {
 	}
 	if(Array.isArray(obj)) {
 		obj = {
-			'*:*:*:*:*': obj
+			[quintet.wildcard.as_raw_string()]: obj
 		};
 	}
 	for(let prop in obj) {
@@ -911,7 +922,7 @@ function wrap_in_filter<V>(obj: any): filtered_map<V> {
 }
 
 async function load_workspace(absolute_file_name: string, target?: string, parent_workspace?: workspace) {
-	logger.info(`loading workspace from file ${absolute_file_name}`);
+	logger.verbose(`loading workspace from file ${absolute_file_name}`);
 
 	var ws = new workspace({ 'name': '' });
 	ws.all_files           = new Map<string, any>();
@@ -935,9 +946,13 @@ async function load_workspace(absolute_file_name: string, target?: string, paren
 	ws = loaded[0];
 	ws.workspace_directory = path.dirname(absolute_file_name);
 	ws.all_files = all_files;
+	if(!parent_workspace) {
+		ws.target_quintet = target ? new quintet(target) : ws.calculate_default_target();
+		logger.verbose(`target quintet detected as: ${ws.target_quintet}`)
+	} else {
+		ws.target_quintet = parent_workspace.target_quintet;
+	}
 	
-	ws.target_quintet = target ? new quintet(target) : ws.calculate_default_target();
-	logger.info(`target quintet detected as: ${ws.target_quintet}`)
 	ws.imports = await ws.load_imports();
 	ws.components = await ws.load_components();
 	return ws;
@@ -947,20 +962,22 @@ module.exports.jsm = async function(absolute_file_name: string, target?: string)
 	try {
 		const ws = await load_workspace(absolute_file_name, target);
 
-		ws.resolve_all_dependencies();
-		ws.determine_build_order();
+		let known_targets = ws.resolve_all_dependencies();
+		let build_order   = ws.determine_build_order(known_targets);
 		ws.resolve_all_external_dependencies();
+		logger.info(`build order: ${build_order.map(v => v.parent.name + '/' + v.name).join(', ')}`);
 
 // console.log('after dependency resolution');
 // console.log(util.inspect(ws, true, 12, true));
 
 // 		console.log(ws.build_order);
 
-// console.log(util.inspect(ws, true, 12, true));
+console.log(util.inspect(ws, true, 12, true));
+console.log(ser.serialize(ws));
 
 		return ws;
 	} catch(e) {
-		console.log(`exception: ${e}`);
+		logger.error(`exception: ${e}`);
 		console.log(e.stack);
 		return null;
 	}
