@@ -154,6 +154,7 @@ class workspace {
 	build_order    : target[];
 
 	all_files: Map<string, any>;
+	known_targets: Map<string, target>;
 
 	constructor(obj: any) {
 		this.name            = obj.name;
@@ -162,7 +163,7 @@ class workspace {
 
 		this.defaults        = obj.defaults || {};
 		this.component_names = wrap_in_filter<string>(obj.components || []);
-		this.components      = wrap_in_filter<any>([]);
+		this.components      = wrap_in_filter<workspace>([]);
 		this.targets         = wrap_in_filter<target>(obj.targets || []).transform_all_elements_sync(make_target);
 		this.targets.matching_elements(quintet.wildcard).forEach((t: target) => { t.parent = this; });
 
@@ -176,6 +177,7 @@ class workspace {
 		this.properties = {};
 		this.extensions = [];
 
+		this.known_targets   = new Map<string, target>();
 		this.edges           = new Map<target, target[]>();
 		this.build_order     = [];
 
@@ -245,16 +247,16 @@ class workspace {
 		}
 	}
 
-	resolve_dependencies(root: workspace, known_targets : Map<string, target>, padding: string = '') {
-		logger.verbose(`${padding}resolving dependencies for component ${this.name}`);
+	resolve_dependencies(root: workspace, padding: string = '') {
+		logger.verbose(`${padding}resolving internal dependencies for component ${this.name}`);
 		
 		this.targets.matching_elements(root.target_quintet).map((t: target) => {
 			t.depends.matching_elements(root.target_quintet).map((r: target_reference) => {
 				const k = r.component_name + ':' + r.target_name;
 				logger.verbose(`${padding}  ${t.name} depends on ${k}`);
-				if(known_targets.has(k)) {
+				if(root.known_targets.has(k)) {
 					logger.verbose(`${padding}    found suitable build target for ${k}`);
-					r.target = known_targets.get(k)!;
+					r.target = root.known_targets.get(k)!;
 
 					if(!root.edges.has(r.target)) {
 						root.edges.set(r.target, []);
@@ -267,11 +269,11 @@ class workspace {
 		});
 		
 		this.components.matching_elements(root.target_quintet).map((comp: workspace) => {
-			comp.resolve_dependencies(root, known_targets, padding + '    ');
+			comp.resolve_dependencies(root, padding + '    ');
 		});
 	}
 
-	resolve_all_dependencies() {
+	resolve_all_internal_dependencies() {
 		const root = this;
 		let collect_known_targets = function(ws: workspace) {
 			let targs = new Map<string, target>();
@@ -287,13 +289,17 @@ class workspace {
 			return targs;
 		}
 	
-		let known_targets = collect_known_targets(this);
-		this.resolve_dependencies(this, known_targets);
-		return known_targets;
+		this.known_targets = collect_known_targets(this);
+		this.resolve_dependencies(this);
+	}
+	
+	resolve_all_dependencies() {
+		this.resolve_all_internal_dependencies();
+		this.resolve_all_external_dependencies();
 	}
 
-	determine_build_order(known_targets : Map<string, target>) {
-		known_targets.forEach((t: target, k: string) => {
+	determine_build_order() {
+		this.known_targets.forEach((t: target, k: string) => {
 			if(!this.edges.has(t)) {
 				this.edges.set(t, []);
 			}
@@ -342,7 +348,7 @@ class workspace {
 		let cache = new Map<string, external_dependency>();
 		let root = this;
 		const resolve_externals = function(ws: workspace, padding : string = '') {
-			logger.verbose(`${padding}resolving externals for component ${ws.name}`);
+			logger.verbose(`${padding}resolving external dependencies for component ${ws.name}`);
 			
 			ws.targets.matching_elements(root.target_quintet).map((t: target) => {
 				t.external_deps.matching_elements(root.target_quintet).map((e: external_dependency) => {
@@ -421,6 +427,20 @@ class workspace {
 			logger.error(error_message);
 			throw new Error(error_message);
 		}
+	}
+
+	pick_toolchain() {
+		let candidates = this.toolchains.filter((tc: toolchain) => {
+			
+			return true;
+		});
+	}
+
+	generate_build_commands(): any {
+		let chosen_toolchain = this.pick_toolchain();
+		this.build_order.map((t: target) => {
+			
+		});
 	}
 
 	async load_component(component: string): Promise<workspace> {
@@ -962,18 +982,17 @@ module.exports.jsm = async function(absolute_file_name: string, target?: string)
 	try {
 		const ws = await load_workspace(absolute_file_name, target);
 
-		let known_targets = ws.resolve_all_dependencies();
-		let build_order   = ws.determine_build_order(known_targets);
-		ws.resolve_all_external_dependencies();
+		ws.resolve_all_dependencies();
+		let build_order   = ws.determine_build_order();
 		logger.info(`build order: ${build_order.map(v => v.parent.name + '/' + v.name).join(', ')}`);
-
+		ws.generate_build_commands();
 // console.log('after dependency resolution');
 // console.log(util.inspect(ws, true, 12, true));
 
 // 		console.log(ws.build_order);
 
-console.log(util.inspect(ws, true, 12, true));
-console.log(ser.serialize(ws));
+// console.log(util.inspect(ws, true, 12, true));
+// console.log(ser.serialize(ws));
 
 		return ws;
 	} catch(e) {

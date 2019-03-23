@@ -6,6 +6,10 @@
 		"lib": ["es2018", "es2017", "esnext.array"],
 		"noImplicitAny": true,
 		"strict": true,
+		"preserveConstEnums": true,
+		"experimentalDecorators": true,
+		"emitDecoratorMetadata": true,
+		"declaration": true,
 		"moduleResolution": "node",
 		"sourceMap": true,
 		"outDir": "dist",
@@ -18,6 +22,6 @@
 		}
 	},
 	"include": [
-		"src/**/*"
+		"lib/**/*"
 	]
 }
