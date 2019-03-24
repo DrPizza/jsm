@@ -1,6 +1,7 @@
 {
 	'kind'    : 'toolchain',
-	'name'    : ['win32:msvc:*:x64:*','uwp:msvc:*:x64:*'],
+	'name'    : 'microsoft c/c++ optimizing compiler',
+	'quintets': ['win32:msvc:*:x64:*','uwp:msvc:*:x64:*'],
 
 	'defines': {
 		'*:msvc:*:x64:*'    : ['X64'],

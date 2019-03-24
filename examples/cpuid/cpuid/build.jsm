@@ -6,8 +6,8 @@
 			'kind'   : 'target',
 			'name'   : 'cpuid',
 			'type'   : 'executable',
-			'headers': ['src/**/*.hpp'].except(['src/**/stdafx.hpp']),
-			'srcs'   : ['src/**/*.cpp'].except(['src/**/stdafx.cpp']),
+			'headers': 'src/**/*.hpp',
+			'sources': 'src/**/*.cpp',
 			'depends': [
 				'//libcpuid:libcpuid',
 				'//docopt:docopt'

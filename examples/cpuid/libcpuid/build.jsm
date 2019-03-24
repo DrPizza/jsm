@@ -12,8 +12,24 @@
 				{ 'cpuid.hpp'   : 'include/cpuid/cpuid.hpp'   },
 				{ 'suffixes.hpp': 'include/cpuid/suffixes.hpp'}
 			],
-			'headers'         : ['src/**/*.hpp'].except(['src/**/stdafx.hpp']),
-			'srcs'            : ['src/**/*.cpp'].except(['src/**/stdafx.cpp']),
+			'headers'         : 'src/**/*.hpp',
+			'sources'         : {
+				'*:*:*:*:*': [
+					{
+						'srcs'          : ['src/**/*.cpp'],
+						'excludes'      : 'src/**/stdafx.cpp',
+						'compiler_flags': {
+							'msvc:*:*:*:*': [ '/Yustdafx.hpp', '/Fplibcpuid.pch' ]
+						}
+					}
+				],
+				'*:msvc:*:*:*': [
+					{
+						'srcs'          : 'src/**/stdafx.cpp',
+						'compiler_flags': ['/Ycstdafx.hpp', '/Fplibcpuid.pch' ]
+					}
+				]
+			},
 			'external_deps'   : {
 				'*:*:*:*:*': [
 					{
@@ -48,5 +64,22 @@
 				],
 			},
 		},
+		{
+			'kind'         : 'target',
+			'name'         : 'libcpuid-test',
+			'type'         : 'executable',
+			'headers'      : 'test/**/*.hpp',
+			'sources'      : 'test/**/*.cpp',
+			'depends': [
+				'//libcpuid:libcpuid',
+			],
+			'external_deps': [ {
+				'kind'   : 'external',
+				'name'   : 'gtest',
+				'version': '2019-01-04-1',
+				'type'   : 'static',
+				'providers': 'vcpkg',
+			} ],
+		}
 	]
 }

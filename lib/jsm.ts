@@ -2,10 +2,9 @@ import fs from 'fs';
 import path from 'path';
 import util from 'util';
 import worker from 'worker_threads';
-import _ from 'lodash';
 import winston from 'winston';
-
-var cerealizer = require('../../cerealizer/');
+import glob from 'fast-glob';
+import * as yaserializer from 'yaserializer';
 
 function get_call_location(): any {
 	var stacklist = (new Error()).stack!.split('\n').slice(3).filter((value: string) => {
@@ -70,8 +69,36 @@ const logger = new Proxy(winston.createLogger({
 				winston.format.prettyPrint({ colorize: true }),
 				winston.format.timestamp(),
 				winston.format.printf((info) => {
-					return (`[` + `${info.level}`.padStart(18) + ' ]' + ` ${info.timestamp}: ${info.message}`).padEnd(180) + `(at ${info.filename} (${info.tid}:${info.func}))`;
-				}),
+					const limit = 120;
+					const escape = '\x1b['
+					const lines : string[] = []
+					const colour_on  = info.message.substring(info.message.indexOf(escape)    , info.message.indexOf('m', info.message.indexOf    (escape)) + 1);
+					const colour_off = info.message.substring(info.message.lastIndexOf(escape), info.message.indexOf('m', info.message.lastIndexOf(escape)) + 1);
+					info.message = info.message.substring(colour_on.length, info.message.length - colour_off.length);
+					const indent_width = info.message.trimRight().length - info.message.trim().length;
+					
+					lines.push(info.message.substr(0, limit));
+					info.message = info.message.substr(limit);
+					while(info.message.length > (limit - indent_width)) {
+						lines.push(info.message.substr(0, limit - indent_width));
+						info.message = info.message.substr(limit - indent_width);
+					}
+					if(info.message.trim() !== '') {
+						lines.push(info.message);
+					}
+					
+					const head           = `[` + `${info.level}`.padStart(18) + ' ]' + ` ${info.timestamp}: `;
+					const tail           = ` (at ${info.filename} (${info.tid}:${info.func}))`;
+					const left_padding   = ' '.repeat(head.length - colour_on.length - colour_off.length);
+					const right_padding  = ' '.repeat(tail.length);
+					const indent_padding = ' '.repeat(indent_width);
+					
+					lines[0] = head + colour_on + lines[0].padEnd(120) + colour_off + tail;
+					for(let i = 1; i < lines.length; ++i) {
+						lines[i] = left_padding + indent_padding + colour_on + lines[i].padEnd(limit) + colour_off + right_padding;
+					}
+					return lines.join('\n');
+				})
 			)
 		}),
 		new winston.transports.File({
@@ -80,7 +107,7 @@ const logger = new Proxy(winston.createLogger({
 			format: winston.format.combine(
 				winston.format.colorize({ level: false }),
 				winston.format.prettyPrint({ colorize: false }),
-				winston.format.timestamp({ format: "YYYY-MM-DD HH:MM:ss" }),
+				winston.format.timestamp(),
 				winston.format.printf((info) => {
 					return `${info.level} ${info.timestamp}: ${info.message} (at ${info.filename} (${info.tid}:${info.func}))`;
 				}),
@@ -93,8 +120,6 @@ util.inspect.defaultOptions.compact = true;
 util.inspect.defaultOptions.breakLength = 135;
 util.inspect.defaultOptions.showHidden = true;
 util.inspect.defaultOptions.colors = true;
-
-const ser = new cerealizer.cerealizer();
 
 function unique<T>(arr: T[], compare?: (a: T, b: T) => number, fuse?: (a: T, b: T) => T) : T[] {
 	compare = compare || function (l: T, r: T) {
@@ -118,18 +143,9 @@ function unique<T>(arr: T[], compare?: (a: T, b: T) => number, fuse?: (a: T, b: 
 	return arr;
 }
 
-process.nextTick(() => {
-	let all_classes =
-	[
-		archiver, compiler, dynamic_library, executable, extension, external_dependency, external_resolution, filespec, filtered_map, header_only, linker,
-		static_library, target, target_reference, tool, toolchain, workspace
-	];
-	all_classes.map(clazz => {
-		ser.make_class_serializable(clazz);
-	});
-	ser.make_class_serializable(quintet, undefined, quintet.serialize, quintet.deserialize);
-});
+const ser = new yaserializer.yaserializer();
 
+@yaserializer.serializable
 class workspace {
 	name: string;
 	import_names: filtered_map<string>;
@@ -148,7 +164,7 @@ class workspace {
 	properties: any;
 	extensions: extension[];
 	
-	parent?: workspace;
+	parent: workspace | null;
 
 	edges          : Map<target, target[]>;
 	build_order    : target[];
@@ -176,6 +192,8 @@ class workspace {
 		this.toolchains = [];
 		this.properties = {};
 		this.extensions = [];
+
+		this.parent = null;
 
 		this.known_targets   = new Map<string, target>();
 		this.edges           = new Map<target, target[]>();
@@ -361,14 +379,18 @@ class workspace {
 								e.resolution = cache.get(key)!.resolution;
 								logger.verbose(`${padding}    ${key} for ${t.name} in ${ws.name} resolved from cache`);
 							} else {
-								root.extensions.forEach((ext: extension) => {
-									if(!e.resolution && (ext.name == p || p == '*')) {
-										let resolution = ext.resolve(host_env, e, root.target_quintet);
+								root.extensions.filter((ext: extension) => {
+									return ext instanceof package_manager && ext.is_applicable(root.target_quintet);
+								}).map((ext: extension) => {
+									return ext as package_manager;
+								}).forEach((pm: package_manager) => {
+									if(!e.resolution && (pm.name == p || p == '*')) {
+										let resolution = pm.resolve(host_env, e, root.target_quintet);
 										if(resolution) {
-											logger.verbose(`${padding}    ${key} for ${t.name} in ${ws.name} resolved by ${ext.name}`);
+											logger.verbose(`${padding}    ${key} for ${t.name} in ${ws.name} resolved by ${pm.name}`);
 											e.resolution = Object.assign(new external_resolution(), resolution);
 										} else {
-											logger.warn(`${padding}    ${key} for ${t.name} in ${ws.name} not resolved by ${ext.name}`);
+											logger.warn(`${padding}    ${key} for ${t.name} in ${ws.name} not resolved by ${pm.name}`);
 										}
 									}
 								});
@@ -429,23 +451,15 @@ class workspace {
 		}
 	}
 
-	pick_toolchain() {
-		let candidates = this.toolchains.filter((tc: toolchain) => {
-			
-			return true;
-		});
-	}
-
 	generate_build_commands(): any {
-		let chosen_toolchain = this.pick_toolchain();
 		this.build_order.map((t: target) => {
-			
+			t.build(this.target_quintet);
 		});
 	}
 
 	async load_component(component: string): Promise<workspace> {
 		const filename = path.normalize(this.resolve_filename(component));
-		const response = await new Promise((resolve: (value:any) => void, reject: (err: any) => void) => {
+		const { response, err } = await new Promise((resolve: (value:any) => void, reject: (err: any) => void) => {
 			const wrk: worker.Worker = new worker.Worker(__filename, {
 				workerData: {
 					'filename': filename,
@@ -462,6 +476,10 @@ class workspace {
 				}
 			});
 		});
+		if(err) {
+			throw ser.deserialize(err);
+		}
+		
 		// <runs the fragment just below the class>
 		// propagate cached items back into the parent cache
 		const ws: workspace = ser.deserialize(response);
@@ -487,24 +505,14 @@ class workspace {
 
 if(!worker.isMainThread) {
 	process.nextTick(async () => {
-		const ws = await load_workspace(worker.workerData.filename, worker.workerData.target, ser.deserialize(worker.workerData.parent_workspace));
-		worker.parentPort!.postMessage(ser.serialize(ws));
+		try {
+			const ws = await load_workspace(worker.workerData.filename, worker.workerData.target, ser.deserialize(worker.workerData.parent_workspace));
+			worker.parentPort!.postMessage({ response: ser.serialize(ws), err: null });
+		} catch(e) {
+			worker.parentPort!.postMessage({ response: null, err: ser.serialize(e) });
+		}
 	});
 }
-
-class filespec {
-	inclusions: string[];
-	exceptions: string[];
-
-	constructor(inclusions: string[], exceptions: string[]) {
-		this.inclusions = inclusions;
-		this.exceptions = exceptions;
-	}
-}
-
-Object.defineProperty(Array.prototype, 'except', { value: function(exceptions: string[]): filespec {
-	return new filespec(this, exceptions);
-} });
 
 class quintet_part {
 	major: string;
@@ -548,6 +556,7 @@ class quintet_part {
 	}
 }
 
+@yaserializer.serializable
 class quintet {
 	parts        : quintet_part[];
 
@@ -561,10 +570,15 @@ class quintet {
 		});
 	}
 
+	@yaserializer.unserializable
 	get platform      () { return this.parts[0]; }
+	@yaserializer.unserializable
 	get toolchain     () { return this.parts[1]; }
+	@yaserializer.unserializable
 	get type          () { return this.parts[2]; }
+	@yaserializer.unserializable
 	get arch          () { return this.parts[3]; }
+	@yaserializer.unserializable
 	get configuration () { return this.parts[4]; }
 
 	match(rhs: quintet): boolean {
@@ -600,10 +614,12 @@ class quintet {
 		return 0;
 	}
 
+	@yaserializer.serializer
 	static serialize(q: quintet) {
 		return [ q.as_raw_string(), false];
 	}
 	
+	@yaserializer.deserializer
 	static deserialize(structured: quintet, destructured: any) {
 		let q = new quintet(destructured as string);
 		structured.parts = q.parts;
@@ -613,6 +629,7 @@ class quintet {
 	static wildcard : quintet = new quintet('*:*:*:*:*');
 }
 
+@yaserializer.serializable
 class tool {
 	executable: string;
 	flags     : filtered_map<string>;
@@ -635,6 +652,7 @@ class tool {
 	}
 }
 
+@yaserializer.serializable
 class compiler extends tool {
 	defines: filtered_map<string>;
 
@@ -644,20 +662,108 @@ class compiler extends tool {
 	}
 }
 
+@yaserializer.serializable
 class linker extends tool {
 	constructor(executable: string, flags: any, command: any, output: any) {
 		super(executable, flags, command, output);
 	}
 }
 
+@yaserializer.serializable
 class archiver extends tool {
 	constructor(executable: string, flags: any, command: any, output: any) {
 		super(executable, flags, command, output);
 	}
 }
 
+@yaserializer.serializable
+class extension {
+	name   : string;
+	quintets: quintet[];
+	language: string;
+	// TODO: different types of extension that offer different verbs
+
+	constructor(spec: any) {
+		this.name     = spec.name;
+		
+		let options = {
+			language: 'javascript',
+			quintets: [],
+		};
+		Object.assign(options, spec);
+		
+		this.quintets = ((Array.isArray(options.quintets) ? options.quintets : [options.quintets]) as string[]).map((val: string) => new quintet(val)) ;
+		this.language = options.language;
+	}
+	
+	is_applicable(target_quintet: quintet) {
+		return this.quintets.some(quin => target_quintet.match(quin));
+	}
+}
+
+@yaserializer.serializable
+class custom_function extends extension {
+	constructor(spec: any) {
+		super(spec);
+	}
+}
+
+@yaserializer.serializable
+class package_manager extends extension {
+	constructor(spec: any) {
+		super(spec);
+		this.resolve  = spec.resolve;
+	}
+
+	resolve: (env: any, ext: external_dependency, target: quintet) => any;
+}
+
+function add_extension(ws: workspace, obj: any) {
+	switch(obj.type) {
+		case 'package-manager':
+			{
+				const ext = new package_manager(obj);
+				ws.extensions.push(ext);
+				return ext;
+			}
+		default:
+			throw new Error(`unknown extension type ${obj.type}`);
+		}
+}
+
+type file_pattern = string | RegExp;
+
+@yaserializer.serializable
+class source_spec {
+	srcs    : filtered_map<file_pattern>;
+	excludes: filtered_map<file_pattern>;
+	defines : filtered_map<string>;
+	flags   : filtered_map<string>;
+	
+	constructor(spec: any) {
+		if(typeof spec === 'string' || spec instanceof RegExp) {
+			spec = { 'srcs': [spec] };
+		}
+		
+		let options = {
+			srcs: [],
+			excludes: [],
+			defines: [],
+			flags: []
+		};
+		
+		Object.assign(options, spec);
+		this.srcs     = wrap_in_filter<file_pattern>(Array.isArray(options.srcs) ? options.srcs : [options.srcs]);
+		this.excludes = wrap_in_filter<file_pattern>(Array.isArray(options.excludes) ? options.excludes : [options.excludes]);
+		this.defines  = wrap_in_filter<string>(Array.isArray(options.defines) ? options.defines : [options.defines]);
+		this.flags    = wrap_in_filter<string>(Array.isArray(options.flags) ? options.flags : [options.flags]);
+	}
+}
+
+@yaserializer.serializable
 class toolchain {
-	name    : quintet[];
+	name    : string;
+	quintets: quintet[];
 	compiler: compiler;
 	linker  : linker;
 	archiver: archiver;
@@ -665,6 +771,7 @@ class toolchain {
 	constructor(spec: any) {
 		var options = {
 			'name': '',
+			'quintets': [],
 
 			'compiler_name': '',
 			'compiler_flags': {},
@@ -683,7 +790,9 @@ class toolchain {
 			'archiver_output': {},
 		};
 		Object.assign(options, spec);
-		this.name = ((Array.isArray(options.name) ? options.name : [options.name]) as string[]).map((val: string) => new quintet(val)) ;
+		
+		this.name     = options.name;
+		this.quintets = ((Array.isArray(options.quintets) ? options.quintets : [options.quintets]) as string[]).map((val: string) => new quintet(val)) ;
 
 		this.compiler = new compiler(options.compiler_name, options.compiler_flags, options.compiler_command, options.compiler_output, options.defines);
 		this.linker   = new linker  (options.linker_name  , options.linker_flags  , options.linker_command  , options.linker_output                   );
@@ -691,7 +800,7 @@ class toolchain {
 	}
 
 	is_applicable(target_quintet: quintet) {
-		return this.name.some(quin => target_quintet.match(quin));
+		return this.quintets.some(quin => target_quintet.match(quin));
 	}
 }
 
@@ -705,6 +814,7 @@ function add_properties(ws: workspace, obj: any) {
 	return Object.assign(ws.properties, obj);
 }
 
+@yaserializer.serializable
 class target_reference {
 	component_name: string;
 	target_name   : string;
@@ -724,13 +834,19 @@ class target_reference {
 
 type name_map = object;
 
+interface glob_result extends fs.Stats {
+	path: string;
+	depth: number;
+}
+
+@yaserializer.serializable
 class target {
 	name     : string;
 	namespace: string;
 
 	exported_headers  : filtered_map<name_map>;
-	headers           : filtered_map<string | filespec>;
-	srcs              : filtered_map<string | filespec>;
+	headers           : filtered_map<string>;
+	sources           : filtered_map<source_spec>;
 	depends           : filtered_map<target_reference>;
 	external_deps     : filtered_map<external_dependency>;
 	parent           !: workspace;
@@ -741,7 +857,7 @@ class target {
 			'namespace': '',
 			'exported_headers': [] as any[],
 			'headers': [] as any[],
-			'srcs' : [] as any[],
+			'sources' : [] as any[],
 			'depends': [] as any[],
 			'external_deps': [] as any[]
 		};
@@ -752,31 +868,84 @@ class target {
 		this.namespace = options.namespace;
 
 		this.exported_headers = wrap_in_filter<name_map>(options.exported_headers);
-		this.headers          = wrap_in_filter<string | filespec>(options.headers);
-		this.srcs             = wrap_in_filter<string | filespec>(options.srcs);
+		this.headers          = wrap_in_filter<string>(options.headers);
+		this.sources          = wrap_in_filter<string>(options.sources)      .transform_all_elements_sync(create_regular_object(source_spec));
 		this.depends          = wrap_in_filter<string>(options.depends)      .transform_all_elements_sync(create_regular_object(target_reference   ));
 		this.external_deps    = wrap_in_filter<string>(options.external_deps).transform_all_elements_sync(create_regular_object(external_dependency));
 	}
+	
+	pick_toolchain(q: quintet) {
+		let recurse = (ws: workspace): (toolchain | null) => {
+			let candidates = ws.toolchains.filter((tc: toolchain) => {
+				return tc.is_applicable(q);
+			});
+			
+			if(candidates.length !== 0) {
+				return candidates[0];
+			}
+
+			if(ws.parent != null) {
+				return recurse(ws.parent);
+			} else {
+				return null;
+			}
+		};
+		return recurse(this.parent);
+	}
+	
+	generate_source_batches(target_quintet: quintet) {
+		const options = {
+			'cwd': this.parent.workspace_directory,
+			'mark': true,
+			'stats': true,
+		};
+		return this.sources.matching_elements(target_quintet).map((spec: source_spec) => {
+			return spec.srcs.matching_elements(target_quintet).map((value: file_pattern) => {
+				if(typeof value === 'string') {
+					return glob.sync<glob_result>(value, options);
+				} else {
+					throw new Error('TODO: implement regexp patterns');
+				}
+			});
+		}).flat();
+	}
+	
+	build(target_quintet: quintet): any {
+		let chosen_toolchain = this.pick_toolchain(target_quintet);
+		if(!chosen_toolchain) {
+			throw new Error(`no viable tolchain found for ${this.name} with target ${target_quintet}`)
+		}
+		logger.verbose(`using ${chosen_toolchain.name} for ${this.name}`);
+		
+		const sources = this.generate_source_batches(target_quintet);
+		logger.silly(`  files to build: ${sources.flat().map((e) => { return e.path; }).join(', ')}`);
+		
+	}
+
 }
 
+@yaserializer.serializable
 class executable extends target {
 	constructor(spec: any) {
 		super(spec);
 	}
 }
 
+@yaserializer.serializable
 class dynamic_library extends target {
 	constructor(spec: any) {
 		super(spec);
 	}
 }
 
+@yaserializer.serializable
 class static_library extends target {
 	constructor(spec: any) {
 		super(spec);
 	}
 }
 
+@yaserializer.serializable
 class header_only extends target {
 	constructor(spec: any) {
 		super(spec);
@@ -798,31 +967,14 @@ function make_target(obj: any): target {
 	}
 }
 
-class extension {
-	name   : string;
-	language: string;
-	// TODO: different types of extension that offer different verbs
-	resolve: (env: any, ext: external_dependency, target: quintet) => any;
-
-	constructor(spec: any) {
-		this.name     = spec.name;
-		this.language = spec.language || 'javascript';
-		this.resolve  = spec.resolve;
-	}
-}
-
-function add_extension(ws: workspace, obj: any) {
-	var ext = new extension(obj);
-	ws.extensions.push(ext);
-	return ext;
-}
-
+@yaserializer.serializable
 class external_resolution {
 	headers?: filtered_map<string>;
 	lib    ?: filtered_map<string>;
 	bin    ?: filtered_map<string>;
 }
 
+@yaserializer.serializable
 class external_dependency {
 	name      : string;
 	version   : string;
@@ -847,6 +999,7 @@ function create_regular_object(clazz: Function) {
 	}
 }
 
+@yaserializer.serializable
 class filtered_map<V> extends Map<quintet, V[]> {
 	static make<V>(spec: {[s:string]: V[]}) {
 		return new filtered_map<V>(Array.from(Object.entries(spec)).map((value: [string, V[]]) => {
@@ -925,7 +1078,7 @@ function wrap_in_filter<V>(obj: any): filtered_map<V> {
 			[quintet.wildcard.as_raw_string()]: []
 		};
 	}
-	if(typeof obj === 'string' || obj instanceof filespec) {
+	if(typeof obj === 'string' || obj instanceof RegExp) {
 		obj = [obj];
 	}
 	if(Array.isArray(obj)) {
@@ -993,11 +1146,9 @@ module.exports.jsm = async function(absolute_file_name: string, target?: string)
 
 // console.log(util.inspect(ws, true, 12, true));
 // console.log(ser.serialize(ws));
-
 		return ws;
 	} catch(e) {
 		logger.error(`exception: ${e}`);
 		console.log(e.stack);
-		return null;
 	}
 }

@@ -9,8 +9,8 @@
 			'type'            : 'static',
 			'namespace'       : 'docopt',
 			'exported_headers': [ { 'docopt.hpp'  : 'include/docopt/docopt.hpp' } ],
-			'headers'         : ['src/**/*.hpp'].except(['src/**/stdafx.hpp']),
-			'srcs'            : ['src/**/*.cpp'].except(['src/**/stdafx.cpp']),
+			'headers'         : ['src/**/*.hpp'],
+			'sources'         : ['src/**/*.cpp'],
 			'external_deps'   : {
 				'*:*:*:*:*': [
 					{
@@ -30,5 +30,22 @@
 				],
 			},
 		},
+		{
+			'kind'         : 'target',
+			'name'         : 'docopt-test',
+			'type'         : 'executable',
+			'headers'      : 'test/src/**/*.hpp',
+			'sources'      : 'test/src/**/*.cpp',
+			'depends': [
+				'//docopt:docopt',
+			],
+			'external_deps': [ {
+				'kind'   : 'external',
+				'name'   : 'gtest',
+				'version': '2019-01-04-1',
+				'type'   : 'static',
+				'providers': 'vcpkg',
+			} ],
+		}
 	]
 }

@@ -1,6 +1,8 @@
 {
 	'kind': 'extension',
+	'type': 'package-manager',
 	'name': 'vcpkg',
+	'quintets': ['*:*:*:*:*'],
 	'language': 'javascript',
 	'resolve': function(host /*: host_environment */, ext /*: external_dependency*/) {
 		const path = require('path');
