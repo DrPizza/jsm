@@ -28,7 +28,7 @@
 	'compiler_command': {
 		'win32:msvc:*:*:*': '${compiler} ${defines} ${includes} ${compiler-flags} /Fo${object-dir}%{relative-path} /c ${source}'
 	},
-	'compiler_output': {
+	'compiler_name_mapping': {
 		'*:msvc:*:*:*': [
 			{'**/*.cpp': '**/*.obj'}, // src-dir/path/to/file.cpp -> object-dir/path/to/file.obj
 			{'**/*.c'  : '**/*.obj'}

@@ -117,6 +117,7 @@ const logger = new Proxy(winston.createLogger({
 }), handler);
 
 util.inspect.defaultOptions.compact = true;
+util.inspect.defaultOptions.depth = 2;
 util.inspect.defaultOptions.breakLength = 135;
 util.inspect.defaultOptions.showHidden = true;
 util.inspect.defaultOptions.colors = true;
@@ -451,9 +452,9 @@ class workspace {
 		}
 	}
 
-	generate_build_commands(): any {
-		this.build_order.map((t: target) => {
-			t.build(this.target_quintet);
+	generate_build_steps(): build_step[][] {
+		return this.build_order.map((t: target) => {
+			return t.calculate_build_steps(this.target_quintet);
 		});
 	}
 
@@ -631,29 +632,40 @@ class quintet {
 
 @yaserializer.serializable
 class tool {
-	executable: string;
-	flags     : filtered_map<string>;
-	command   : filtered_map<string>;
-	output    : filtered_map<name_map>;
-
-	constructor(executable: string, flags: any, command: any, output: any) {
-		this.executable = executable;
-		this.flags      = wrap_in_filter<string>(flags || []);
-		this.command    = wrap_in_filter<string>(command || []);
-		this.output     = wrap_in_filter<name_map>(output || []);
-	}
-
-	generate_command(inputs: any) {
-		return [''];
-	}
-
-	output_names(inputs: any) {
-		return [''];
+	generate_command(target_quintet: quintet, inputs: any) {
+		return [] as glob_result[];
 	}
 }
 
 @yaserializer.serializable
-class compiler extends tool {
+class copy_tool extends tool {
+	constructor() {
+		super();
+	}
+}
+
+@yaserializer.serializable
+class build_tool extends tool {
+	executable  : string;
+	flags       : filtered_map<string>;
+	command     : filtered_map<string>;
+	name_mapping: filtered_map<name_map>;
+
+	constructor(executable: string, flags: any, command: any, name_mapping: any) {
+		super();
+		this.executable   = executable;
+		this.flags        = wrap_in_filter<string>(flags || []);
+		this.command      = wrap_in_filter<string>(command || []);
+		this.name_mapping = wrap_in_filter<name_map>(name_mapping || []);
+	}
+
+	generate_output_names(target_quintet: quintet, inputs: glob_result[]) {
+		return inputs;
+	}
+}
+
+@yaserializer.serializable
+class compiler extends build_tool {
 	defines: filtered_map<string>;
 
 	constructor(executable: string, flags: any, command: any, output: any, defines: any) {
@@ -663,14 +675,14 @@ class compiler extends tool {
 }
 
 @yaserializer.serializable
-class linker extends tool {
+class linker extends build_tool {
 	constructor(executable: string, flags: any, command: any, output: any) {
 		super(executable, flags, command, output);
 	}
 }
 
 @yaserializer.serializable
-class archiver extends tool {
+class archiver extends build_tool {
 	constructor(executable: string, flags: any, command: any, output: any) {
 		super(executable, flags, command, output);
 	}
@@ -776,27 +788,27 @@ class toolchain {
 			'compiler_name': '',
 			'compiler_flags': {},
 			'compiler_command': {},
-			'compiler_output': {},
-			'defines': [] as any[],
+			'compiler_name_mapping': {},
+			'defines': [],
 
 			'linker_name': '',
 			'linker_flags': {},
 			'linker_command': {},
-			'linker_output': {},
+			'linker_name_mapping': {},
 
 			'archiver_name': '',
 			'archiver_flags': {},
 			'archiver_command': {},
-			'archiver_output': {},
+			'archiver_name_mapping': {},
 		};
 		Object.assign(options, spec);
 		
 		this.name     = options.name;
 		this.quintets = ((Array.isArray(options.quintets) ? options.quintets : [options.quintets]) as string[]).map((val: string) => new quintet(val)) ;
 
-		this.compiler = new compiler(options.compiler_name, options.compiler_flags, options.compiler_command, options.compiler_output, options.defines);
-		this.linker   = new linker  (options.linker_name  , options.linker_flags  , options.linker_command  , options.linker_output                   );
-		this.archiver = new archiver(options.archiver_name, options.archiver_flags, options.archiver_command, options.archiver_output                 );
+		this.compiler = new compiler(options.compiler_name, options.compiler_flags, options.compiler_command, options.compiler_name_mapping, options.defines);
+		this.linker   = new linker  (options.linker_name  , options.linker_flags  , options.linker_command  , options.linker_name_mapping                   );
+		this.archiver = new archiver(options.archiver_name, options.archiver_flags, options.archiver_command, options.archiver_name_mapping                 );
 	}
 
 	is_applicable(target_quintet: quintet) {
@@ -837,6 +849,32 @@ type name_map = object;
 interface glob_result extends fs.Stats {
 	path: string;
 	depth: number;
+}
+
+interface tool_invocation {
+	target: target;
+	
+	command: string;
+	
+	implicit_inputs: glob_result[];
+	explicit_inputs: glob_result[];
+	
+	explicit_outputs: glob_result[];
+	implicit_outputs: glob_result[];
+}
+
+interface build_tool_invocation extends tool_invocation {
+	toolchain: toolchain;
+	
+	defines: string[];
+	flags  : string[];
+}
+
+interface build_step {
+	target: target;
+	tool: tool;
+	
+	invocations: tool_invocation[];
 }
 
 @yaserializer.serializable
@@ -890,58 +928,16 @@ class target {
 				return null;
 			}
 		};
-		return recurse(this.parent);
-	}
-	
-	generate_source_batches(target_quintet: quintet) {
-		const options = {
-			'cwd': this.parent.workspace_directory,
-			'mark': true,
-			'stats': true,
-		};
-		return this.sources.matching_elements(target_quintet).map((spec: source_spec) => {
-			return spec.srcs.matching_elements(target_quintet).map((value: file_pattern) => {
-				if(typeof value === 'string') {
-					return glob.sync<glob_result>(value, options);
-				} else {
-					throw new Error('TODO: implement regexp patterns');
-				}
-			});
-		}).flat();
-	}
-	
-	build(target_quintet: quintet): any {
-		let chosen_toolchain = this.pick_toolchain(target_quintet);
-		if(!chosen_toolchain) {
-			throw new Error(`no viable tolchain found for ${this.name} with target ${target_quintet}`)
+		let tc = recurse(this.parent);
+		if(!tc) {
+			throw new Error(`no viable tolchain found for ${this.name} with target ${q}`)
 		}
-		logger.verbose(`using ${chosen_toolchain.name} for ${this.name}`);
-		
-		const sources = this.generate_source_batches(target_quintet);
-		logger.silly(`  files to build: ${sources.flat().map((e) => { return e.path; }).join(', ')}`);
-		
+		logger.verbose(`using ${tc.name} for ${this.parent.name}/${this.name}`);
+		return tc;
 	}
-
-}
-
-@yaserializer.serializable
-class executable extends target {
-	constructor(spec: any) {
-		super(spec);
-	}
-}
-
-@yaserializer.serializable
-class dynamic_library extends target {
-	constructor(spec: any) {
-		super(spec);
-	}
-}
-
-@yaserializer.serializable
-class static_library extends target {
-	constructor(spec: any) {
-		super(spec);
+	
+	calculate_build_steps(target_quintet: quintet): build_step[] {
+		return [];
 	}
 }
 
@@ -949,6 +945,178 @@ class static_library extends target {
 class header_only extends target {
 	constructor(spec: any) {
 		super(spec);
+	}
+
+	calculate_dependent_headers(target_quintet: quintet) {
+		const inclusions = this.headers.matching_elements(target_quintet).map((value: file_pattern) => {
+			if(typeof value !== 'string') {
+				throw new Error('TODO: implement regexp patterns');
+			} else {
+				return value;
+			}
+		});
+		const options = {
+			'cwd': this.parent.workspace_directory,
+			'stats': true,
+			'matchBase': true
+		};
+		return glob.sync<glob_result>(inclusions, options);
+	}
+	
+	calculate_header_copy_step(target_quintet: quintet): build_step {
+		const inputs = this.exported_headers.matching_elements(target_quintet).map((value: name_map) => {
+			return Object.entries(value);
+		});
+		console.log(inputs);
+		const options = {
+			'cwd': this.parent.workspace_directory,
+			'stats': true,
+			'matchBase': true
+		};
+		//return glob.sync<glob_result>(inclusions, options);
+		
+		return {
+			'target'     : this,
+			'tool'       : new copy_tool(),
+			'invocations': [
+				{
+					'target': this,
+					'command': 'copy some files',
+					'implicit_inputs': this.calculate_dependent_headers(target_quintet),
+					'explicit_inputs': [],
+					'explicit_outputs': [],
+					'implicit_outputs': []
+				}
+			]
+		};
+	}
+
+	calculate_build_steps(target_quintet: quintet): build_step[] {
+		let steps = super.calculate_build_steps(target_quintet);
+		steps.push(this.calculate_header_copy_step(target_quintet));
+		return steps;
+	}
+}
+
+@yaserializer.serializable
+class compiled_target extends header_only {
+	constructor(spec: any) {
+		super(spec);
+	}
+
+	calculate_source_groups(target_quintet: quintet, spec: source_spec) {
+		const inclusions = spec.srcs.matching_elements(target_quintet).map((value: file_pattern) => {
+			if(typeof value !== 'string') {
+				throw new Error('TODO: implement regexp patterns');
+			} else {
+				return value;
+			}
+		});
+		const exclusions = spec.excludes.matching_elements(target_quintet).map((value: file_pattern) => {
+			if(typeof value !== 'string') {
+				throw new Error('TODO: implement regexp patterns');
+			} else {
+				return value;
+			}
+		});
+		const options = {
+			'cwd': this.parent.workspace_directory,
+			'stats': true,
+			'matchBase': true,
+			'ignore': exclusions
+		};
+		return glob.sync<glob_result>(inclusions, options);
+	}
+	
+	calculate_compile_step(target_quintet: quintet, chosen_toolchain: toolchain): build_step {
+		const dependent_headers = this.calculate_dependent_headers(target_quintet);
+		return {
+			'target'     : this,
+			'tool'       : chosen_toolchain.compiler,
+			'invocations': this.sources.matching_elements(target_quintet).map((spec: source_spec): build_tool_invocation => {
+				const groups = this.calculate_source_groups(target_quintet, spec);
+				return {
+					'target'          : this,
+					'toolchain'       : chosen_toolchain,
+					'defines'         : spec.defines.matching_elements(target_quintet),
+					'flags'           : spec.flags  .matching_elements(target_quintet),
+					'command'         : '',
+					'implicit_inputs' : dependent_headers,
+					'explicit_inputs' : groups,
+					'explicit_outputs': chosen_toolchain.compiler.generate_output_names(target_quintet, groups),
+					'implicit_outputs': chosen_toolchain.compiler.generate_output_names(target_quintet, [])
+				}
+			}),
+		};
+	}
+
+	calculate_build_steps(target_quintet: quintet): build_step[] {
+		const steps = super.calculate_build_steps(target_quintet);
+		const chosen_toolchain = this.pick_toolchain(target_quintet);
+		const compile_step = this.calculate_compile_step(target_quintet, chosen_toolchain);
+		logger.silly(`  files to build: ${compile_step.invocations.map(value => { return value.explicit_inputs.map(gr => { return gr.path;  });}).flat().join(', ')}`);
+		logger.silly(`  timestamps    : ${compile_step.invocations.map(value => { return value.explicit_inputs.map(gr => { return gr.mtime; });}).flat().join(', ')}`);
+		steps.push(compile_step);
+		return steps;
+	}
+}
+
+@yaserializer.serializable
+class linked_target extends compiled_target {
+	constructor(spec: any) {
+		super(spec);
+	}
+
+	calculate_link_step(target_quintet: quintet, chosen_toolchain: toolchain) {
+		return {
+			'target'     : this,
+			'tool'       : chosen_toolchain.linker,
+			'invocations': []
+		};
+	}
+
+	calculate_build_steps(target_quintet: quintet): build_step[] {
+		const steps = super.calculate_build_steps(target_quintet);
+		const chosen_toolchain = this.pick_toolchain(target_quintet);
+		steps.push(this.calculate_link_step(target_quintet, chosen_toolchain));
+		return steps;
+	}
+}
+
+@yaserializer.serializable
+class executable extends linked_target {
+	constructor(spec: any) {
+		super(spec);
+	}
+}
+
+@yaserializer.serializable
+class dynamic_library extends linked_target {
+	constructor(spec: any) {
+		super(spec);
+	}
+}
+
+@yaserializer.serializable
+class static_library extends compiled_target {
+	constructor(spec: any) {
+		super(spec);
+	}
+
+	calculate_archiver_step(target_quintet: quintet, chosen_toolchain: toolchain){
+		return {
+			'target'     : this,
+			'tool'       : chosen_toolchain.archiver,
+			'invocations': []
+		};
+
+	}
+
+	calculate_build_steps(target_quintet: quintet): build_step[] {
+		const steps = super.calculate_build_steps(target_quintet);
+		const chosen_toolchain = this.pick_toolchain(target_quintet);
+		steps.push(this.calculate_archiver_step(target_quintet, chosen_toolchain));
+		return steps;
 	}
 }
 
@@ -1138,7 +1306,8 @@ module.exports.jsm = async function(absolute_file_name: string, target?: string)
 		ws.resolve_all_dependencies();
 		let build_order   = ws.determine_build_order();
 		logger.info(`build order: ${build_order.map(v => v.parent.name + '/' + v.name).join(', ')}`);
-		ws.generate_build_commands();
+		let build_steps = ws.generate_build_steps();
+		console.log(util.inspect(build_steps));
 // console.log('after dependency resolution');
 // console.log(util.inspect(ws, true, 12, true));
 
