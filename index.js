@@ -1,9 +1,9 @@
-const jsm = require('./dist/jsm.js');
+const jsm = require('./dist/jsm').jsm;
 const path = require('path');
 const util = require('util');
 
 async function main() {
-	await jsm.jsm(path.normalize(path.resolve('build.jsm')));
+	await jsm(path.normalize(path.resolve('build.jsm')));
 }
 
 main();

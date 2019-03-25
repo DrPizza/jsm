@@ -1,7 +1,7 @@
 {
 	"compilerOptions": {
 		"module": "commonjs",
-		"esModuleInterop": true,
+		"esModuleInterop": false,
 		"target": "es2017",
 		"lib": ["es2018", "es2017", "esnext.array"],
 		"noImplicitAny": true,
