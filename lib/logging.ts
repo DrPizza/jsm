@@ -2,6 +2,9 @@ import * as util from 'util';
 import * as path from 'path';
 import * as worker from 'worker_threads';
 import * as winston from 'winston';
+import wrap_ansi from 'wrap-ansi';
+import slice_ansi from 'slice-ansi';
+import { default as strip_ansi } from 'strip-ansi';
 
 function get_call_location(): any {
 	var stacklist = (new Error()).stack!.split('\n').slice(3).filter((value: string) => {
@@ -67,32 +70,29 @@ const logger = new Proxy(winston.createLogger({
 				winston.format.timestamp(),
 				winston.format.printf((info) => {
 					const limit = 120;
-					const escape = '\x1b['
-					const lines : string[] = []
-					const colour_on  = info.message.substring(info.message.indexOf(escape)    , info.message.indexOf('m', info.message.indexOf    (escape)) + 1);
-					const colour_off = info.message.substring(info.message.lastIndexOf(escape), info.message.indexOf('m', info.message.lastIndexOf(escape)) + 1);
-					info.message = info.message.substring(colour_on.length, info.message.length - colour_off.length);
-					const indent_width = info.message.trimRight().length - info.message.trim().length;
+					const stripped = strip_ansi(info.message);
+					const indent_width = stripped.trimRight().length - stripped.trim().length;
+					info.message = slice_ansi(info.message, indent_width);
+					const lines = wrap_ansi(info.message, limit - indent_width, { wordWrap: false, hard: true, trim: false }).split('\n');
 
-					lines.push(info.message.substr(0, limit));
-					info.message = info.message.substr(limit);
-					while(info.message.length > (limit - indent_width)) {
-						lines.push(info.message.substr(0, limit - indent_width));
-						info.message = info.message.substr(limit - indent_width);
-					}
-					if(info.message.trim() !== '') {
-						lines.push(info.message);
-					}
+					let ansi_pad_left = (a: string, limit: number) => {
+						const padding_needed = limit - strip_ansi(a).length;
+						return ' '.repeat(padding_needed) + a;
+					};
+					let ansi_pad_right = (a: string, limit: number) => {
+						const padding_needed = limit - strip_ansi(a).length;
+						return a + ' '.repeat(padding_needed);
+					};
 
-					const head           = `[` + `${info.level}`.padStart(18) + ' ]' + ` ${info.timestamp}: `;
+					const head           = `[` + `${ansi_pad_left(info.level, 9)}` + ' ]' + ` ${info.timestamp}: `;
 					const tail           = ` (at ${info.filename} (${info.tid}:${info.func}))`;
-					const left_padding   = ' '.repeat(head.length - colour_on.length - colour_off.length);
-					const right_padding  = ' '.repeat(tail.length);
+					const left_padding   = ' '.repeat(strip_ansi(head).length);
+					const right_padding  = ' '.repeat(strip_ansi(tail).length);
 					const indent_padding = ' '.repeat(indent_width);
 
-					lines[0] = head + colour_on + lines[0].padEnd(120) + colour_off + tail;
+					lines[0] = head + indent_padding + ansi_pad_right(lines[0], limit - indent_width) + tail;
 					for(let i = 1; i < lines.length; ++i) {
-						lines[i] = left_padding + indent_padding + colour_on + lines[i].padEnd(limit) + colour_off + right_padding;
+						lines[i] = left_padding + indent_padding + ansi_pad_right(lines[i], limit - indent_width) + right_padding;
 					}
 					return lines.join('\n');
 				})
@@ -105,6 +105,7 @@ const logger = new Proxy(winston.createLogger({
 				winston.format.colorize({ level: false }),
 				winston.format.prettyPrint({ colorize: false }),
 				winston.format.timestamp(),
+				winston.format.uncolorize(),
 				winston.format.printf((info) => {
 					return `${info.level} ${info.timestamp}: ${info.message} (at ${info.filename} (${info.tid}:${info.func}))`;
 				}),

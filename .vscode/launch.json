@@ -10,7 +10,8 @@
 			"name": "Launch Program",
 			"program": "${workspaceFolder}\\index.js",
 			"cwd": "${workspaceFolder}\\examples\\cpuid\\",
-			"protocol": "inspector"
+			"protocol": "inspector",
+			"sourceMaps": true
 		}
 	]
 }

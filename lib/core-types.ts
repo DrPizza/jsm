@@ -55,7 +55,9 @@ export class quintet_part {
 		return this.parts.join('/');
 	}
 
-	toString() : string { return this.as_raw_string(); }
+	get [Symbol.toStringTag]() : string {
+		return this.as_raw_string();
+	}
 
 	static compare(l: quintet_part, r: quintet_part) : number {
 		const sl = l.as_raw_string(), sr = r.as_raw_string();

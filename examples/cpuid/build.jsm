@@ -1,6 +1,5 @@
 {
 	"kind": "workspace",
-	"name": "//cpuid-master",
 	"imports": [
 		"builtin://defaults.jsm",
 		"builtin://plugins/msvc.jsm",
@@ -32,8 +31,8 @@
 		}
 	},
 	"components": [
-		"file://cpuid/build.jsm",
-		"file://libcpuid/build.jsm",
-		"file://docopt/build.jsm"
+		"//cpuid",
+		"//libcpuid/build.jsm:libcpuid",
+		"//docopt:docopt"
 	]
 }

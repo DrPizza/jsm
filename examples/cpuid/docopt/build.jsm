@@ -1,6 +1,5 @@
 {
 	"kind": "workspace",
-	"name": "//docopt",
 	"imports": [],
 	"targets": [
 		{
@@ -37,7 +36,7 @@
 			"headers"      : "test/src/**/*.hpp",
 			"sources"      : "test/src/**/*.cpp",
 			"depends": [
-				"//docopt:docopt"
+				":docopt"
 			],
 			"external_deps": [ {
 				"kind"   : "external",

@@ -1,6 +1,5 @@
 {
 	"kind": "workspace",
-	"name": "//cpuid",
 	"targets": [
 		{
 			"kind"   : "target",
@@ -9,8 +8,8 @@
 			"headers": "src/**/*.hpp",
 			"sources": "src/**/*.cpp",
 			"depends": [
-				"//libcpuid:libcpuid",
-				"//docopt:docopt"
+				"//libcpuid",
+				"//docopt"
 			],
 			"external_deps"   : {
 				"*:*:*:*:*": [
@@ -31,7 +30,6 @@
 			"headers": [],
 			"srcs"   : ["test/**/*.cpp"],
 			"depends": [
-				"//libcpuid:libcpuid",
 				"//cpuid:cpuid"
 			],
 			"external_deps"   : {

@@ -1,6 +1,5 @@
 {
 	"kind": "workspace",
-	"name": "//libcpuid",
 	"imports": [],
 	"targets": [
 		{
@@ -71,7 +70,7 @@
 			"headers"      : "test/**/*.hpp",
 			"sources"      : "test/**/*.cpp",
 			"depends": [
-				"//libcpuid:libcpuid"
+				":libcpuid"
 			],
 			"external_deps": [ {
 				"kind"   : "external",

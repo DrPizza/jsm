@@ -11,15 +11,61 @@ import * as yas from './serializer';
 import { filtered_map, quintet, quintet_part } from './core-types';
 import logger from './logging';
 
+const default_build_file_name = 'build.jsm';
+
 const the_serializer = yas.the_serializer;
 
 @yas.serializable
+class label {
+	base    : string;
+	filename: string;
+	target  : string;
+	constructor(s: string) {
+		// full      : //path/to/folder/file.name:target
+		// implicit  : //path/to/folder        => //path/to/folder:folder
+		// same-level: :target                 => //path/to/self:target
+		
+		const label_pattern = /^(\/\/[^.:]*)??(\/[^/.]*\.[^/:]+)?(:.*)?$/;
+		const matches = label_pattern.exec(s);
+		if(!matches) {
+			throw new Error(`can't parse label ${s}`);
+		}
+		this.base     = matches[1] || '';
+		this.filename = matches[2] || '';
+		this.target   = matches[3] || '';
+	}
+	
+	make_absolute(ws: workspace) {
+		if(this.base == '') {
+			this.base = '/' + path.normalize(ws.workspace_directory).replace(path.normalize(ws.root_directory), '').replace(path.sep, '/');
+		}
+		if(this.filename == '') {
+			this.filename = '/' + default_build_file_name;
+		}
+		if(this.target == '') {
+			this.target = ':' + this.base.split('/').slice(-1)[0];
+		}
+		return this;
+	}
+	
+	// toString() : string {
+	// 	return this.base + this.filename + this.target;
+	// }
+	
+	get [Symbol.toStringTag]() : string {
+		return this.base + this.filename + this.target;
+	}
+}
+
+@yas.serializable
 class workspace {
-	name: string;
+	name: label;
+
+	all_files: Map<string, any>;
 	import_names: filtered_map<string>;
 	imports: filtered_map<any>;
 	defaults: any;
-	component_names: filtered_map<string>;
+	component_names: filtered_map<label>;
 	components: filtered_map<workspace>;
 	targets: filtered_map<target>;
 
@@ -37,23 +83,21 @@ class workspace {
 	edges          : Map<target, target[]>;
 	build_order    : target[];
 
-	all_files: Map<string, any>;
 	known_targets: Map<string, target>;
 
-	constructor(obj: any) {
-		this.name            = obj.name;
+	constructor(filename: string, obj: any) {
+		this.name            = new label('//');
 		this.import_names    = wrap_in_filter<string>(obj.imports || []);
 		this.imports         = wrap_in_filter<any>([]);
 
 		this.defaults        = obj.defaults || {};
-		this.component_names = wrap_in_filter<string>(obj.components || []);
+		this.component_names = wrap_in_filter<string>(obj.components).transform_all_elements_sync(create_regular_object(label));
 		this.components      = wrap_in_filter<workspace>([]);
 		this.targets         = wrap_in_filter<target>(obj.targets || []).transform_all_elements_sync(make_target);
-		this.targets.matching_elements(quintet.wildcard).forEach((t: target) => { t.parent = this; });
 
 		this.root_directory      = process.cwd();
 		this.jsm_directory       = __dirname;
-		this.workspace_directory = process.cwd();
+		this.workspace_directory = path.dirname(filename);
 
 		this.target_quintet = new quintet('*:*:*:*:*');
 
@@ -68,6 +112,11 @@ class workspace {
 		this.build_order     = [];
 
 		this.all_files  = new Map<string, any>();
+	
+		this.targets.matching_elements(quintet.wildcard).forEach((t: target) => {
+			t.parent = this;
+			t.name.make_absolute(this);
+		});
 	}
 
 	calculate_default_target() {
@@ -81,14 +130,14 @@ class workspace {
 		return new quintet(`${platform}:${toolchain}:${type}:${architecture}:${configuration}`);
 	}
 
-	parse(o: any): any {
+	parse(filename: string, o: any): any {
 		if(!Array.isArray(o)) {
 			o = [o];
 		}
 		const parsed = o.map((obj: any) => {
 			switch(obj.kind) {
 			case 'workspace':
-				return new workspace(obj);
+				return new workspace(filename, obj);
 			case 'toolchain':
 				return add_toolchain(this, obj);
 			case 'properties':
@@ -111,39 +160,48 @@ class workspace {
 		});
 	}
 
-	resolve_filename(pth: string): string {
-		// 'file://foo.jsm'    -> filename: root_directory      / 'foo.jsm'
+	resolve_filename(lab: label ): string;
+	resolve_filename(pth: string): string;
+	resolve_filename(name: (label | string)): string {
+		// 'file://foo.jsm'    -> filename: full_absolute_path  / 'foo.jsm'
 		// 'builtin://foo.jsm' -> filename: jsm_directory       / 'foo.jsm'
-		// 'foo.jsm'           -> filename: workspace_directory / 'foo.jsm'
 		// '~/foo.jsm'         -> filename: home_directory      / 'foo.jsm'
-		if(pth.startsWith('file://')) {
-			return path.normalize(this.root_directory + path.sep + pth.substr('file://'.length));
-		} else if(pth.startsWith('builtin://')) {
-			return path.normalize(this.jsm_directory + path.sep + '..' + path.sep + pth.substr('builtin://'.length));
-		} else if(pth.startsWith('~/')) {
-			return path.normalize(os.homedir + path.sep  + pth.substr('~/'.length));
-		} else {
-			return path.normalize(this.workspace_directory + path.sep + pth);
+		// '//foo.jsm'         -> filename: root_directory      / 'foo.jsm'
+		// 'foo.jsm'           -> filename: workspace_directory / 'foo.jsm'
+		if(typeof name === 'string') {
+			if(name.startsWith('file://')) {
+				return path.normalize(this.root_directory + path.sep + name.substr('file://'.length)); // TODO crack the URL properly
+			} else if(name.startsWith('builtin://')) {
+				return path.normalize(this.jsm_directory + path.sep + '..' + path.sep + name.substr('builtin://'.length));
+			} else if(name.startsWith('~/')) {
+				return path.normalize(os.homedir + path.sep  + name.substr('~/'.length));
+			} else if(!name.startsWith(':') && !name.startsWith('//')) {
+				return path.normalize(this.workspace_directory + path.sep + name);
+			}
 		}
+		if(!(name instanceof label)) {
+			name = new label(name);
+		}
+		const filename = name.filename === '' ? default_build_file_name : name.filename;
+		const pth      = name.base     === '' ? this.workspace_directory : this.root_directory + path.sep + name.base;
+		return path.normalize(pth + path.sep + filename);
 	}
 
 	load_file(filename: string): any {
 		if(this.all_files.has(filename)) {
 			return this.all_files.get(filename)!;
 		} else {
-			const obj = this.parse(eval('(' + fs.readFileSync(filename, {encoding: 'utf-8'}) + ')'));
+			const obj = this.parse(filename, eval('(' + fs.readFileSync(filename, {encoding: 'utf-8'}) + ')'));
 			this.all_files.set(filename, obj);
 			return obj;
 		}
 	}
 
 	resolve_dependencies(root: workspace, padding: string = '') {
-		logger.verbose(`${padding}resolving internal dependencies for component ${this.name}`);
-
 		this.targets.matching_elements(root.target_quintet).map((t: target) => {
 			t.depends.matching_elements(root.target_quintet).map((r: target_reference) => {
-				const k = r.component_name + ':' + r.target_name;
-				logger.verbose(`${padding}  ${t.name} depends on ${k}`);
+				const k = r.name.make_absolute(t.parent).toString();
+				logger.verbose(`${padding}${t.name} depends on ${k}`);
 				if(root.known_targets.has(k)) {
 					logger.verbose(`${padding}    found suitable build target for ${k}`);
 					r.target = root.known_targets.get(k)!;
@@ -159,7 +217,7 @@ class workspace {
 		});
 
 		this.components.matching_elements(root.target_quintet).map((comp: workspace) => {
-			comp.resolve_dependencies(root, padding + '    ');
+			comp.resolve_dependencies(root, padding + '  ');
 		});
 	}
 
@@ -168,7 +226,7 @@ class workspace {
 		let collect_known_targets = function(ws: workspace) {
 			let targs = new Map<string, target>();
 			ws.targets.matching_elements(root.target_quintet).map((t: target) => {
-				targs.set(ws.name + ':' + t.name, t);
+				targs.set(t.name.toString(), t);
 			});
 
 			ws.components.matching_elements(root.target_quintet).map((comp: workspace) => {
@@ -238,18 +296,16 @@ class workspace {
 		let cache = new Map<string, external_dependency>();
 		let root = this;
 		const resolve_externals = function(ws: workspace, padding : string = '') {
-			logger.verbose(`${padding}resolving external dependencies for component ${ws.name}`);
-
 			ws.targets.matching_elements(root.target_quintet).map((t: target) => {
 				t.external_deps.matching_elements(root.target_quintet).map((e: external_dependency) => {
-					logger.verbose(`${padding}  ${t.name} depends on ${e.name}`);
+					logger.verbose(`${padding}${t.name} depends on ${e.name}`);
 					if(e.resolution === null) {
 						let provs = e.providers.matching_elements(root.target_quintet);
 						provs.map((p: string) => {
 							const key = `${p}::${e.name}::${e.version}`;
 							if(cache.has(key)) {
 								e.resolution = cache.get(key)!.resolution;
-								logger.verbose(`${padding}    ${key} for ${t.name} in ${ws.name} resolved from cache`);
+								logger.verbose(`${padding}    ${key} for ${t.name} resolved from cache`);
 							} else {
 								root.extensions.filter((ext: extension) => {
 									return ext instanceof package_manager && ext.is_applicable(root.target_quintet);
@@ -259,17 +315,17 @@ class workspace {
 									if(!e.resolution && (pm.name == p || p == '*')) {
 										let resolution = pm.resolve(host_env, e, root.target_quintet);
 										if(resolution) {
-											logger.verbose(`${padding}    ${key} for ${t.name} in ${ws.name} resolved by ${pm.name}`);
+											logger.verbose(`${padding}    ${key} for ${t.name} resolved by ${pm.name}`);
 											e.resolution = Object.assign(new external_resolution(), resolution);
 										} else {
-											logger.warn(`${padding}    ${key} for ${t.name} in ${ws.name} not resolved by ${pm.name}`);
+											logger.warn(`${padding}    ${key} for ${t.name} not resolved by ${pm.name}`);
 										}
 									}
 								});
 								if(e.resolution) {
 									cache.set(key, e);
 								} else {
-									logger.warn(`${padding}    ${key} for ${t.name} in ${ws.name} was not fulfilled`);
+									logger.warn(`${padding}    ${key} for ${t.name} was not fulfilled`);
 								}
 							}
 						});
@@ -278,7 +334,7 @@ class workspace {
 			});
 
 			ws.components.matching_elements(ws.target_quintet).map((comp: workspace) => {
-				resolve_externals(comp, padding + '    ');
+				resolve_externals(comp, padding + '  ');
 			});
 		}
 		resolve_externals(root);
@@ -302,14 +358,14 @@ class workspace {
 		const error_message = missing.filter((value: [workspace, target, external_dependency]) => {
 			return value[2].optional == false;
 		}).map((value: [workspace, target, external_dependency]) => {
-			return `${value[0].name}/${value[1].name} has unresolved required external dependency ${value[2].name}::${value[2].version}`
+			return `${value[1].name} has unresolved required external dependency ${value[2].name}::${value[2].version}`
 			     + ` from ${value[2].providers.matching_elements(root.target_quintet)}`;
 		}).join('\n');
 
 		const warning_message = missing.filter((value: [workspace, target, external_dependency]) => {
 			return value[2].optional == true;
 		}).map((value: [workspace, target, external_dependency]) => {
-			return `${value[0].name}/${value[1].name} has unresolved optional external dependency ${value[2].name}::${value[2].version}`
+			return `${value[1].name} has unresolved optional external dependency ${value[2].name}::${value[2].version}`
 			     + ` from ${value[2].providers.matching_elements(root.target_quintet)}`;
 		}).join('\n');
 
@@ -329,7 +385,7 @@ class workspace {
 		});
 	}
 
-	async load_component(component: string): Promise<workspace> {
+	async load_component(component: label): Promise<workspace> {
 		const filename = path.normalize(this.resolve_filename(component));
 		const { response, err } = await new Promise((resolve: (value:any) => void, reject: (err: any) => void) => {
 			const wrk: worker.Worker = new worker.Worker(__filename, {
@@ -369,7 +425,7 @@ class workspace {
 	}
 
 	async load_components() {
-		return await this.component_names.transform_matching_elements(this.target_quintet, async (elem: string) => {
+		return await this.component_names.transform_matching_elements(this.target_quintet, async (elem: label) => {
 			return this.load_component(elem);
 		});
 	}
@@ -664,14 +720,11 @@ function add_properties(ws: workspace, obj: any) {
 
 @yas.serializable
 class target_reference {
-	component_name: string;
-	target_name   : string;
+	name : label;
 	target        : target | null;
 
 	constructor(ref: string) {
-		const parts = ref.split(':');
-		this.component_name = parts[0];
-		this.target_name    = parts[1];
+		this.name   = new label(ref);
 		this.target = null;
 	}
 }
@@ -714,8 +767,8 @@ interface build_step {
 }
 
 @yas.serializable
-class target {
-	name     : string;
+abstract class target {
+	name     : label;
 	namespace: string;
 
 	exported_headers  : filtered_map<name_map>;
@@ -738,7 +791,7 @@ class target {
 
 		Object.assign(options, spec);
 
-		this.name      = options.name;
+		this.name      = new label(options.name.indexOf(':') !== -1 ? options.name : ':' + options.name);
 		this.namespace = options.namespace;
 
 		this.exported_headers = wrap_in_filter<name_map>(options.exported_headers);
@@ -748,9 +801,7 @@ class target {
 		this.external_deps    = wrap_in_filter<string>(options.external_deps).transform_all_elements_sync(create_regular_object(external_dependency));
 	}
 
-	get_specific_quintet(q: quintet) {
-		return q;
-	}
+	abstract get_specific_quintet(q: quintet): quintet;
 
 	pick_toolchain(q: quintet) {
 		let recurse = (ws: workspace): (toolchain | null) => {
@@ -772,12 +823,12 @@ class target {
 		if(!tc) {
 			throw new Error(`no viable tolchain found for ${this.name} with target ${q}`)
 		}
-		logger.verbose(`using ${tc.name} for ${this.parent.name}/${this.name}`);
+		logger.verbose(`using ${tc.name} for ${this.name}`);
 		return tc;
 	}
 
 	do_calculate_build_steps(target_quintet: quintet, tc: toolchain): build_step[] {
-		return []
+		return [];
 	}
 
 	calculate_build_steps(target_quintet: quintet): build_step[] {
@@ -918,15 +969,9 @@ class compiled_target extends header_only {
 }
 
 @yas.serializable
-class linked_target extends compiled_target {
+abstract class linked_target extends compiled_target {
 	constructor(spec: any) {
 		super(spec);
-	}
-
-	get_specific_quintet(q: quintet) {
-		let my_quintet = new quintet(q.as_raw_string());
-		my_quintet.type = new quintet_part('*');
-		return my_quintet;
 	}
 
 	calculate_link_step(target_quintet: quintet, chosen_toolchain: toolchain) {
@@ -1069,16 +1114,16 @@ function wrap_in_filter<V>(obj: any): filtered_map<V> {
 async function load_workspace(absolute_file_name: string, target?: string, parent_workspace?: workspace) {
 	logger.verbose(`loading workspace from file ${absolute_file_name}`);
 
-	var ws = new workspace({ 'name': '' });
+	var ws = new workspace(absolute_file_name, { name: '', workspace_directory: path.dirname(absolute_file_name) });
 	ws.all_files           = new Map<string, any>();
 	if(parent_workspace) {
 		ws.root_directory      = parent_workspace.root_directory;
 		ws.jsm_directory       = parent_workspace.jsm_directory;
 		ws.workspace_directory = path.dirname(absolute_file_name);
 	} else {
-		ws.root_directory      = process.cwd();
+		ws.root_directory      = path.dirname(absolute_file_name);
 		ws.jsm_directory       = __dirname;
-		ws.workspace_directory = process.cwd();
+		ws.workspace_directory = path.dirname(absolute_file_name);
 	}
 
 	const loaded = ws.load_file(absolute_file_name);
@@ -1089,7 +1134,13 @@ async function load_workspace(absolute_file_name: string, target?: string, paren
 
 	const all_files = ws.all_files;
 	ws = loaded[0];
-	ws.workspace_directory = path.dirname(absolute_file_name);
+	if(parent_workspace) {
+		ws.root_directory      = parent_workspace.root_directory;
+		ws.jsm_directory       = parent_workspace.jsm_directory;
+		ws.workspace_directory = path.dirname(absolute_file_name);
+		ws.name = new label('');
+		ws.name.make_absolute(ws);
+	}
 	ws.all_files = all_files;
 	if(!parent_workspace) {
 		ws.target_quintet = target ? new quintet(target) : ws.calculate_default_target();
@@ -1109,7 +1160,7 @@ export async function jsm(absolute_file_name: string, target?: string) {
 
 		ws.resolve_all_dependencies();
 		let build_order   = ws.determine_build_order();
-		logger.info(`build order: ${build_order.map(v => v.parent.name + '/' + v.name).join(', ')}`);
+		logger.info(`build order: ${build_order.map(v => v.name.toString()).join(', ')}`);
 		let build_steps = ws.generate_build_steps();
 
 // console.log('after dependency resolution');
@@ -1117,7 +1168,7 @@ export async function jsm(absolute_file_name: string, target?: string) {
 
 // 		console.log(ws.build_order);
 
-// console.log(util.inspect(ws, true, 12, true));
+console.log(util.inspect(ws, true, 12, true));
 // console.log(ser.serialize(ws));
 		return ws;
 	} catch(e) {
