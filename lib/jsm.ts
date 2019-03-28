@@ -4,61 +4,19 @@ import * as util from 'util';
 import * as worker from 'worker_threads';
 import * as os from 'os';
 
-import * as fg from 'fast-glob';
-import * as mm from 'micromatch';
-
 import * as yas from './serializer';
-import { filtered_map, quintet, quintet_part } from './core-types';
 import logger from './logging';
+import { filtered_map, wrap_in_filter, quintet, label, create_regular_object } from './core-types';
+import { target, header_only, static_library, dynamic_library, executable } from './targets'
+import { copy_tool, compiler, linker, archiver } from './tools';
+import { build_step } from './build-steps';
 
-const default_build_file_name = 'build.jsm';
+export const default_build_file_name = 'build.jsm';
 
 const the_serializer = yas.the_serializer;
 
 @yas.serializable
-class label {
-	base    : string;
-	filename: string;
-	target  : string;
-	constructor(s: string) {
-		// full      : //path/to/folder/file.name:target
-		// implicit  : //path/to/folder        => //path/to/folder:folder
-		// same-level: :target                 => //path/to/self:target
-		
-		const label_pattern = /^(\/\/[^.:]*)??(\/[^/.]*\.[^/:]+)?(:.*)?$/;
-		const matches = label_pattern.exec(s);
-		if(!matches) {
-			throw new Error(`can't parse label ${s}`);
-		}
-		this.base     = matches[1] || '';
-		this.filename = matches[2] || '';
-		this.target   = matches[3] || '';
-	}
-	
-	make_absolute(ws: workspace) {
-		if(this.base == '') {
-			this.base = '/' + path.normalize(ws.workspace_directory).replace(path.normalize(ws.root_directory), '').replace(path.sep, '/');
-		}
-		if(this.filename == '') {
-			this.filename = '/' + default_build_file_name;
-		}
-		if(this.target == '') {
-			this.target = ':' + this.base.split('/').slice(-1)[0];
-		}
-		return this;
-	}
-	
-	// toString() : string {
-	// 	return this.base + this.filename + this.target;
-	// }
-	
-	get [Symbol.toStringTag]() : string {
-		return this.base + this.filename + this.target;
-	}
-}
-
-@yas.serializable
-class workspace {
+export class workspace {
 	name: label;
 
 	all_files: Map<string, any>;
@@ -316,7 +274,7 @@ class workspace {
 										let resolution = pm.resolve(host_env, e, root.target_quintet);
 										if(resolution) {
 											logger.verbose(`${padding}    ${key} for ${t.name} resolved by ${pm.name}`);
-											e.resolution = Object.assign(new external_resolution(), resolution);
+											e.resolution = new external_resolution(resolution);
 										} else {
 											logger.warn(`${padding}    ${key} for ${t.name} not resolved by ${pm.name}`);
 										}
@@ -443,145 +401,7 @@ if(!worker.isMainThread) {
 }
 
 @yas.serializable
-class tool {
-	generate_command(target_quintet: quintet, inputs: any) {
-		return [] as glob_result[];
-	}
-}
-
-@yas.serializable
-class copy_tool extends tool {
-	constructor() {
-		super();
-	}
-}
-
-function compute_renames(mappings: name_map[], inputs: glob_result[]) {
-	let outputs : {[s:string]: string[]} = Object.create(null);
-	mappings.map((mapping: name_map) => {
-		Object.entries(mapping).forEach((pair) => {
-			let template_in = pair[0];
-			if(!Array.isArray(pair[1])) {
-				pair[1] = [pair[1]];
-			}
-			pair[1].map((template_out: string) => {
-				if(template_in === '' && inputs.length === 0) {
-					if(template_in in outputs) {
-						outputs[template_in].push(pair[1]);
-					} else {
-						outputs[template_in] = [pair[1]];
-					}
-					return;
-				}
-				let in_pattern = false;
-				let pattern_start = 0;
-				let pattern_end = 0;
-				let parts_in = [] as [number, number][];
-				let parts_out = [] as [number, number][];
-				for(let i = 0; i < template_in.length; ++i) {
-					if(template_in[i] === '*') {
-						if(!in_pattern) {
-							pattern_start = i;
-							in_pattern = true;
-						}
-					} else if(in_pattern) {
-						pattern_end = i;
-						parts_in.push([pattern_start, pattern_end]);
-						in_pattern = false;
-					}
-				}
-				for(let i = 0; i < template_out.length; ++i) {
-					if(template_out[i] === '*') {
-						if(!in_pattern) {
-							pattern_start = i;
-							in_pattern = true;
-						}
-					} else {
-						if(in_pattern) {
-							pattern_end = i;
-							parts_out.push([pattern_start, pattern_end]);
-							in_pattern = false;
-						}
-					}
-				}
-				for(let k = 0; k < inputs.length; ++k) {
-					let cap = mm.capture(template_in, inputs[k].path);
-					if(cap !== null) {
-						let result = '';
-						let j = 0;
-						for(let i = 0; i < cap.length && i < parts_in.length && i < parts_out.length; ++i) {
-							if(parts_in [i][1] - parts_in [i][0]
-							== parts_out[i][1] - parts_out[i][0]) {
-								result += template_out.substring(j, parts_out[i][0]) + cap[i];
-								j = parts_out[i][1];
-							} else {
-								throw new Error(`don't know how to map filename ${inputs[k].path} using mapping ${template_in} => ${template_out}`);
-							}
-						}
-						result += template_out.substring(j);
-						if(inputs[k].path in outputs) {
-							outputs[inputs[k].path].push(result);
-						} else {
-							outputs[inputs[k].path] = [result];
-						}
-					}
-				}
-			});
-		});
-	});
-	return outputs;
-}
-
-@yas.serializable
-class build_tool extends tool {
-	executable  : string;
-	flags       : filtered_map<string>;
-	command     : filtered_map<string>;
-	name_mapping: filtered_map<name_map>;
-
-	constructor(executable: string, flags: any, command: any, name_mapping: any) {
-		super();
-		this.executable   = executable;
-		this.flags        = wrap_in_filter<string>(flags || []);
-		this.command      = wrap_in_filter<string>(command || []);
-		this.name_mapping = wrap_in_filter<name_map>(name_mapping || []);
-	}
-
-	generate_output_names(target_quintet: quintet, inputs: glob_result[]) {
-		let renames = compute_renames(this.name_mapping.matching_elements(target_quintet), inputs);
-		Object.entries(renames).forEach((value: [string, string[]]) => {
-			logger.silly(`${value[0]} => ${value[1].join(', ')}`);
-		});
-		return inputs;
-	}
-}
-
-@yas.serializable
-class compiler extends build_tool {
-	defines: filtered_map<string>;
-
-	constructor(executable: string, flags: any, command: any, output: any, defines: any) {
-		super(executable, flags, command, output);
-		this.defines = wrap_in_filter<string>(defines);
-	}
-}
-
-@yas.serializable
-class linker extends build_tool {
-	constructor(executable: string, flags: any, command: any, output: any) {
-		super(executable, flags, command, output);
-	}
-}
-
-@yas.serializable
-class archiver extends build_tool {
-	constructor(executable: string, flags: any, command: any, output: any) {
-		super(executable, flags, command, output);
-	}
-}
-
-@yas.serializable
-class extension {
+export class extension {
 	name   : string;
 	quintets: quintet[];
 	language: string;
@@ -606,14 +426,14 @@ class extension {
 }
 
 @yas.serializable
-class custom_function extends extension {
+export class custom_function extends extension {
 	constructor(spec: any) {
 		super(spec);
 	}
 }
 
 @yas.serializable
-class package_manager extends extension {
+export class package_manager extends extension {
 	constructor(spec: any) {
 		super(spec);
 		this.resolve  = spec.resolve;
@@ -635,10 +455,11 @@ function add_extension(ws: workspace, obj: any) {
 		}
 }
 
-type file_pattern = string | RegExp;
+export type file_pattern = string | RegExp;
 
 @yas.serializable
-class source_spec {
+export class source_spec {
+	headers : filtered_map<file_pattern>;
 	srcs    : filtered_map<file_pattern>;
 	excludes: filtered_map<file_pattern>;
 	defines : filtered_map<string>;
@@ -650,6 +471,7 @@ class source_spec {
 		}
 
 		let options = {
+			headers: [],
 			srcs: [],
 			excludes: [],
 			defines: [],
@@ -657,15 +479,16 @@ class source_spec {
 		};
 
 		Object.assign(options, spec);
-		this.srcs     = wrap_in_filter<file_pattern>(Array.isArray(options.srcs) ? options.srcs : [options.srcs]);
+		this.headers  = wrap_in_filter<file_pattern>(Array.isArray(options.headers ) ? options.headers  : [options.headers ]);
+		this.srcs     = wrap_in_filter<file_pattern>(Array.isArray(options.srcs    ) ? options.srcs     : [options.srcs    ]);
 		this.excludes = wrap_in_filter<file_pattern>(Array.isArray(options.excludes) ? options.excludes : [options.excludes]);
-		this.defines  = wrap_in_filter<string>(Array.isArray(options.defines) ? options.defines : [options.defines]);
-		this.flags    = wrap_in_filter<string>(Array.isArray(options.flags) ? options.flags : [options.flags]);
+		this.defines  = wrap_in_filter<string>      (Array.isArray(options.defines ) ? options.defines  : [options.defines ]);
+		this.flags    = wrap_in_filter<string>      (Array.isArray(options.flags   ) ? options.flags    : [options.flags   ]);
 	}
 }
 
 @yas.serializable
-class toolchain {
+export class toolchain {
 	name    : string;
 	quintets: quintet[];
 	compiler: compiler;
@@ -719,326 +542,13 @@ function add_properties(ws: workspace, obj: any) {
 }
 
 @yas.serializable
-class target_reference {
-	name : label;
-	target        : target | null;
+export class target_reference {
+	name  : label;
+	target: target | null;
 
 	constructor(ref: string) {
 		this.name   = new label(ref);
 		this.target = null;
-	}
-}
-
-// class name_map {
-
-// }
-
-type name_map = object;
-
-interface glob_result extends fs.Stats {
-	path: string;
-	depth: number;
-}
-
-interface tool_invocation {
-	target: target;
-
-	command: string;
-
-	implicit_inputs: glob_result[];
-	explicit_inputs: glob_result[];
-
-	explicit_outputs: glob_result[];
-	implicit_outputs: glob_result[];
-}
-
-interface build_tool_invocation extends tool_invocation {
-	toolchain: toolchain;
-
-	defines: string[];
-	flags  : string[];
-}
-
-interface build_step {
-	target: target;
-	tool: tool;
-
-	invocations: tool_invocation[];
-}
-
-@yas.serializable
-abstract class target {
-	name     : label;
-	namespace: string;
-
-	exported_headers  : filtered_map<name_map>;
-	headers           : filtered_map<string>;
-	sources           : filtered_map<source_spec>;
-	depends           : filtered_map<target_reference>;
-	external_deps     : filtered_map<external_dependency>;
-	parent           !: workspace;
-
-	constructor(spec: any) {
-		var options = {
-			'name': '',
-			'namespace': '',
-			'exported_headers': [] as any[],
-			'headers': [] as any[],
-			'sources' : [] as any[],
-			'depends': [] as any[],
-			'external_deps': [] as any[]
-		};
-
-		Object.assign(options, spec);
-
-		this.name      = new label(options.name.indexOf(':') !== -1 ? options.name : ':' + options.name);
-		this.namespace = options.namespace;
-
-		this.exported_headers = wrap_in_filter<name_map>(options.exported_headers);
-		this.headers          = wrap_in_filter<string>(options.headers);
-		this.sources          = wrap_in_filter<string>(options.sources)      .transform_all_elements_sync(create_regular_object(source_spec));
-		this.depends          = wrap_in_filter<string>(options.depends)      .transform_all_elements_sync(create_regular_object(target_reference   ));
-		this.external_deps    = wrap_in_filter<string>(options.external_deps).transform_all_elements_sync(create_regular_object(external_dependency));
-	}
-
-	abstract get_specific_quintet(q: quintet): quintet;
-
-	pick_toolchain(q: quintet) {
-		let recurse = (ws: workspace): (toolchain | null) => {
-			let candidates = ws.toolchains.filter((tc: toolchain) => {
-				return tc.is_applicable(q);
-			});
-
-			if(candidates.length !== 0) {
-				return candidates[0];
-			}
-
-			if(ws.parent != null) {
-				return recurse(ws.parent);
-			} else {
-				return null;
-			}
-		};
-		let tc = recurse(this.parent);
-		if(!tc) {
-			throw new Error(`no viable tolchain found for ${this.name} with target ${q}`)
-		}
-		logger.verbose(`using ${tc.name} for ${this.name}`);
-		return tc;
-	}
-
-	do_calculate_build_steps(target_quintet: quintet, tc: toolchain): build_step[] {
-		return [];
-	}
-
-	calculate_build_steps(target_quintet: quintet): build_step[] {
-		const specific = this.get_specific_quintet(target_quintet);
-		const tc = this.pick_toolchain(specific);
-		return this.do_calculate_build_steps(specific, tc);
-	}
-}
-
-@yas.serializable
-class header_only extends target {
-	constructor(spec: any) {
-		super(spec);
-	}
-
-	get_specific_quintet(q: quintet) {
-		let my_quintet = new quintet(q.as_raw_string());
-		my_quintet.type = new quintet_part('header-only');
-		return my_quintet;
-	}
-
-	calculate_dependent_headers(target_quintet: quintet) {
-		const inclusions = this.headers.matching_elements(target_quintet).map((value: file_pattern) => {
-			if(typeof value !== 'string') {
-				throw new Error('TODO: implement regexp patterns');
-			} else {
-				return value;
-			}
-		});
-		const options = {
-			'cwd': this.parent.workspace_directory,
-			'stats': true,
-			'matchBase': true
-		};
-		return fg.sync<glob_result>(inclusions, options);
-	}
-
-	calculate_header_copy_step(target_quintet: quintet): build_step {
-		const inputs = this.exported_headers.matching_elements(target_quintet).map((value: name_map) => {
-			return Object.entries(value);
-		});
-		const options = {
-			'cwd': this.parent.workspace_directory,
-			'stats': true,
-			'matchBase': true
-		};
-		//return glob.sync<glob_result>(inclusions, options);
-
-		return {
-			'target'     : this,
-			'tool'       : new copy_tool(),
-			'invocations': [
-				{
-					'target': this,
-					'command': 'copy some files',
-					'implicit_inputs': this.calculate_dependent_headers(target_quintet),
-					'explicit_inputs': [],
-					'explicit_outputs': [],
-					'implicit_outputs': []
-				}
-			]
-		};
-	}
-
-	do_calculate_build_steps(target_quintet: quintet, tc: toolchain): build_step[] {
-		let steps = super.do_calculate_build_steps(target_quintet, tc);
-		steps.push(this.calculate_header_copy_step(target_quintet));
-		return steps;
-	}
-}
-
-@yas.serializable
-class compiled_target extends header_only {
-	constructor(spec: any) {
-		super(spec);
-	}
-
-	get_specific_quintet(q: quintet) {
-		let my_quintet = new quintet(q.as_raw_string());
-		my_quintet.type = new quintet_part('*');
-		return my_quintet;
-	}
-
-	calculate_source_groups(target_quintet: quintet, spec: source_spec) {
-		const inclusions = spec.srcs.matching_elements(target_quintet).map((value: file_pattern) => {
-			if(typeof value !== 'string') {
-				throw new Error('TODO: implement regexp patterns');
-			} else {
-				return value;
-			}
-		});
-		const exclusions = spec.excludes.matching_elements(target_quintet).map((value: file_pattern) => {
-			if(typeof value !== 'string') {
-				throw new Error('TODO: implement regexp patterns');
-			} else {
-				return value;
-			}
-		});
-		const options = {
-			'cwd': this.parent.workspace_directory,
-			'stats': true,
-			'matchBase': true,
-			'ignore': exclusions
-		};
-		return fg.sync<glob_result>(inclusions, options);
-	}
-
-	calculate_compile_step(target_quintet: quintet, chosen_toolchain: toolchain): build_step {
-		const dependent_headers = this.calculate_dependent_headers(target_quintet);
-		return {
-			'target'     : this,
-			'tool'       : chosen_toolchain.compiler,
-			'invocations': this.sources.matching_elements(target_quintet).map((spec: source_spec): build_tool_invocation => {
-				const groups = this.calculate_source_groups(target_quintet, spec);
-				return {
-					'target'          : this,
-					'toolchain'       : chosen_toolchain,
-					'defines'         : spec.defines.matching_elements(target_quintet),
-					'flags'           : spec.flags  .matching_elements(target_quintet),
-					'command'         : '',
-					'implicit_inputs' : dependent_headers,
-					'explicit_inputs' : groups,
-					'explicit_outputs': chosen_toolchain.compiler.generate_output_names(target_quintet, groups),
-					'implicit_outputs': chosen_toolchain.compiler.generate_output_names(target_quintet, [])
-				}
-			}),
-		};
-	}
-
-	do_calculate_build_steps(target_quintet: quintet, tc: toolchain): build_step[] {
-		const steps = super.do_calculate_build_steps(target_quintet, tc);
-		const compile_step = this.calculate_compile_step(target_quintet, tc);
-		logger.debug(`  files to build: ${compile_step.invocations.map(value => { return value.explicit_inputs.map(gr => { return gr.path;  });}).flat().join(', ')}`);
-		logger.debug(`  timestamps    : ${compile_step.invocations.map(value => { return value.explicit_inputs.map(gr => { return gr.mtime; });}).flat().join(', ')}`);
-		steps.push(compile_step);
-		return steps;
-	}
-}
-
-@yas.serializable
-abstract class linked_target extends compiled_target {
-	constructor(spec: any) {
-		super(spec);
-	}
-
-	calculate_link_step(target_quintet: quintet, chosen_toolchain: toolchain) {
-		return {
-			'target'     : this,
-			'tool'       : chosen_toolchain.linker,
-			'invocations': []
-		};
-	}
-
-	do_calculate_build_steps(target_quintet: quintet, tc: toolchain): build_step[] {
-		const steps = super.do_calculate_build_steps(target_quintet, tc);
-		steps.push(this.calculate_link_step(target_quintet, tc));
-		return steps;
-	}
-}
-
-@yas.serializable
-class executable extends linked_target {
-	constructor(spec: any) {
-		super(spec);
-	}
-
-	get_specific_quintet(q: quintet) {
-		let my_quintet = new quintet(q.as_raw_string());
-		my_quintet.type = new quintet_part('executable');
-		return my_quintet;
-	}
-}
-
-@yas.serializable
-class dynamic_library extends linked_target {
-	constructor(spec: any) {
-		super(spec);
-	}
-
-	get_specific_quintet(q: quintet) {
-		let my_quintet = new quintet(q.as_raw_string());
-		my_quintet.type = new quintet_part('dynamic');
-		return my_quintet;
-	}
-}
-
-@yas.serializable
-class static_library extends compiled_target {
-	constructor(spec: any) {
-		super(spec);
-	}
-
-	get_specific_quintet(q: quintet) {
-		let my_quintet = new quintet(q.as_raw_string());
-		my_quintet.type = new quintet_part('static');
-		return my_quintet;
-	}
-
-	calculate_archiver_step(target_quintet: quintet, chosen_toolchain: toolchain){
-		return {
-			'target'     : this,
-			'tool'       : chosen_toolchain.archiver,
-			'invocations': []
-		};
-	}
-
-	do_calculate_build_steps(target_quintet: quintet, tc: toolchain): build_step[] {
-		const steps = super.do_calculate_build_steps(target_quintet, tc);
-		steps.push(this.calculate_archiver_step(target_quintet, tc));
-		return steps;
 	}
 }
 
@@ -1058,14 +568,32 @@ function make_target(obj: any): target {
 }
 
 @yas.serializable
-class external_resolution {
-	headers?: filtered_map<string>;
-	lib    ?: filtered_map<string>;
-	bin    ?: filtered_map<string>;
+export class external_resolution {
+	header_dir ?: filtered_map<string>;
+	lib_dir    ?: filtered_map<string>;
+	lib_files  ?: filtered_map<string>;
+	bin_dir    ?: filtered_map<string>;
+	bin_files  ?: filtered_map<string>;
+	
+	constructor(spec: any) {
+		var options = {
+			header_dir: [],
+			lib_dir: [],
+			lib_files: [],
+			bin_dir: [],
+			bin_files: []
+		};
+		Object.assign(options, spec);
+		this.header_dir = wrap_in_filter<string>(options.header_dir);
+		this.lib_dir = wrap_in_filter<string>(options.lib_dir);
+		this.lib_files = wrap_in_filter<string>(options.lib_files);
+		this.bin_dir = wrap_in_filter<string>(options.bin_dir);
+		this.bin_files = wrap_in_filter<string>(options.bin_files);
+	}
 }
 
 @yas.serializable
-class external_dependency {
+export class external_dependency {
 	name      : string;
 	version   : string;
 	type      : string;
@@ -1081,34 +609,6 @@ class external_dependency {
 		this.providers  = wrap_in_filter<string>(spec.providers);
 		this.resolution = null;
 	}
-}
-
-function create_regular_object(clazz: Function) {
-	return function(elem: string) {
-		return Reflect.construct(clazz, [elem]);
-	}
-}
-
-function wrap_in_filter<V>(obj: any): filtered_map<V> {
-	if(obj === undefined) {
-		obj = {
-			[quintet.wildcard.as_raw_string()]: []
-		};
-	}
-	if(typeof obj === 'string' || obj instanceof RegExp) {
-		obj = [obj];
-	}
-	if(Array.isArray(obj)) {
-		obj = {
-			[quintet.wildcard.as_raw_string()]: obj
-		};
-	}
-	for(let prop in obj) {
-		if(!Array.isArray(obj[prop])) {
-			obj[prop] = [obj[prop]];
-		}
-	}
-	return filtered_map.make<V>(obj);
 }
 
 async function load_workspace(absolute_file_name: string, target?: string, parent_workspace?: workspace) {
@@ -1162,17 +662,93 @@ export async function jsm(absolute_file_name: string, target?: string) {
 		let build_order   = ws.determine_build_order();
 		logger.info(`build order: ${build_order.map(v => v.name.toString()).join(', ')}`);
 		let build_steps = ws.generate_build_steps();
+		
+		build_steps.forEach((steps: build_step[]) => {
+			console.log('----');
+			steps.forEach((step: build_step) => {
+				const inputs = Array.from(step.inputs_to_outputs.keys()).join(', ');
+				const outputs = Array.from(step.outputs_to_inputs.keys()).join(', ');
+				console.log(`${step.constructor.name} converting ${inputs} to ${outputs}`);
+			});
+		})
 
 // console.log('after dependency resolution');
 // console.log(util.inspect(ws, true, 12, true));
 
 // 		console.log(ws.build_order);
-
-console.log(util.inspect(ws, true, 12, true));
+//console.log(util.inspect(build_steps, true, 4, true));
+//console.log(util.inspect(ws, true, 12, true));
 // console.log(ser.serialize(ws));
 		return ws;
 	} catch(e) {
 		logger.error(`exception: ${e}`);
 		console.log(e.stack);
+	}
+}
+
+@yas.serializable
+abstract class artefact {
+	name             !: string; // name of the primary output of a build step e.g. foo.obj, foo.exe
+	liveness_metadata!: string; // TODO probably combined m-times of every (contributing?) .jsm
+	target           !: target;
+	
+	constructor() {
+		this.name = '';
+		this.liveness_metadata = '';
+		this.target = {} as any;
+	}
+}
+
+// anything that isn't generated (e.g. input source/headers)
+@yas.serializable
+class original_artefact extends artefact {
+	constructor() {
+		super();
+		
+	}
+}
+
+@yas.serializable
+class copy_artefact extends artefact {
+	copier         !: copy_tool;
+	explicit_input !: artefact;
+	
+	constructor() {
+		super();
+	}
+}
+
+@yas.serializable
+class compiler_artefact extends artefact {
+	source  !: source_spec;
+	compiler!: compiler;
+	
+	// gathered through DEPENDS or similar
+	discovered_inputs!: artefact[];
+	// external headers + headers
+	implicit_inputs!: artefact[];
+	// the source file itself
+	explicit_input!: artefact;
+	// PDB, PCH, etc.
+	implicit_outputs!: string[];
+	
+	constructor() {
+		super();
+	}
+}
+
+@yas.serializable
+class linker_artefact extends artefact {
+	linker!: linker;
+	
+	// obj files + lib files
+	explicit_inputs!: artefact[];
+	// exe or dll
+	explicit_output!: artefact;
+	// PDB, .lib for DLL, etc.
+	implicit_outputs!: artefact[];
+	
+	constructor() {
+		super();
 	}
 }

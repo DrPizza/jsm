@@ -48,17 +48,17 @@
 		"win32:msvc:executable:*:*": "${linker} /libpath:${lib-directories} ${linker-flags} ${libs} ${objects} /PDB:${output-dir}${target-name}.pdb /out:${output-dir}${target-name}.exe",
 		"win32:msvc:dynamic:*:*"   : "${linker} /libpath:${lib-directories} ${linker-flags} ${libs} ${objects} /PDB:${output-dir}${target-name}.pdb /out:${output-dir}${target-name}.dll /implib:${binary-dir}${target-name}.lib"
 	},
-	"linker_output"   : {
-		"win32:msvc:executable:*:*": [ { "": "${target-name}.exe" } ],
-		"win32:msvc:dynamic:*:*"   : [ { "": "${target-name}.dll" } ]
+	"linker_name_mapping"   : {
+		"win32:msvc:executable:*:*": [ { "": "*.exe" } ],
+		"win32:msvc:dynamic:*:*"   : [ { "": "*.dll" } ]
 	},
 
 //	maybe
 //	"naming_rules": {
 //		"object": "%{filename}.obj", // or "%{filename}.o"
-//		"static": "%{filename}.lib", // or "lib%{filename}.a"
-//		"dynamic": "%{filename}.dll", // or "lib%{filename}.so
-//		"executable": "%{filename}.exe", // or "%{filename}"
+//		"static": "${targetname}.lib", // or "lib${targetname}.a"
+//		"dynamic": "${targetname}.dll", // or "lib${targetname}.so
+//		"executable": "${targetname}.exe", // or "${targetname}"
 //	}
 
 	"archiver_name": "lib.exe",
@@ -68,7 +68,7 @@
 	"archiver_command": {
 		"win32:msvc:static:*:*": "${archiver} ${archiver-flags} ${objects} /out:${output-dir}${target-name}.lib"
 	},
-	"archiver_output": {
-		"win32:msvc:static:*:*": [ { "": "${target-name}.lib" } ]
+	"archiver_name_mapping": {
+		"win32:msvc:static:*:*": [ { "": "*.lib" } ]
 	}
 }

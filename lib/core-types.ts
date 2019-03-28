@@ -1,5 +1,8 @@
+import * as path from 'path';
 import * as util from 'util';
+
 import * as yas from './serializer';
+import { workspace, default_build_file_name } from './jsm';
 
 export function unique<T>(arr: T[], compare?: (a: T, b: T) => number, fuse?: (a: T, b: T) => T) : T[] {
 	compare = compare || function (l: T, r: T) {
@@ -21,6 +24,51 @@ export function unique<T>(arr: T[], compare?: (a: T, b: T) => number, fuse?: (a:
 		}
 	}
 	return arr;
+}
+
+
+export function create_regular_object(clazz: Function) {
+	return function(elem: string) {
+		return Reflect.construct(clazz, [elem]);
+	}
+}
+
+@yas.serializable
+export class label {
+	base    : string;
+	filename: string;
+	target  : string;
+	constructor(s: string) {
+		// full      : //path/to/folder/file.name:target
+		// implicit  : //path/to/folder        => //path/to/folder:folder
+		// same-level: :target                 => //path/to/self:target
+		
+		const label_pattern = /^(\/\/[^.:]*)??(\/[^/.]*\.[^/:]+)?(:.*)?$/;
+		const matches = label_pattern.exec(s);
+		if(!matches) {
+			throw new Error(`can't parse label ${s}`);
+		}
+		this.base     = matches[1] || '';
+		this.filename = matches[2] || '';
+		this.target   = matches[3] || '';
+	}
+	
+	make_absolute(ws: workspace) {
+		if(this.base == '') {
+			this.base = '/' + path.normalize(ws.workspace_directory).replace(path.normalize(ws.root_directory), '').replace(path.sep, '/');
+		}
+		if(this.filename == '') {
+			this.filename = '/' + default_build_file_name;
+		}
+		if(this.target == '') {
+			this.target = ':' + this.base.split('/').slice(-1)[0];
+		}
+		return this;
+	}
+	
+	toString() : string {
+		return this.base + this.filename + this.target;
+	}
 }
 
 export class quintet_part {
@@ -55,7 +103,7 @@ export class quintet_part {
 		return this.parts.join('/');
 	}
 
-	get [Symbol.toStringTag]() : string {
+	toString(): string {
 		return this.as_raw_string();
 	}
 
@@ -110,15 +158,13 @@ export class quintet {
 		return this.parts.map((p: quintet_part) => { return p.as_raw_string(); }).join(':');
 	}
 
-	get [Symbol.toStringTag]() {
-		return this.as_raw_string();
-	}
-
 	[util.inspect.custom](depth: number, options: any) {
 		return this.as_raw_string();
 	}
 
-	toString() : string { return this.as_raw_string(); }
+	toString() : string {
+		return this.as_raw_string();
+	}
 
 	static compare(l: quintet, r: quintet) : number {
 		for(let i = 0; i < 5; ++i) {
@@ -204,5 +250,46 @@ export class filtered_map<V> extends Map<quintet, V[]> {
 	}
 	transform_all_elements_sync<U>(fn: (elem: V) => U): filtered_map<U> {
 		return this.transform_matching_elements_sync(quintet.wildcard, fn);
+	}
+}
+
+export function wrap_in_filter<V>(obj: any): filtered_map<V> {
+	if(obj === undefined) {
+		obj = {
+			[quintet.wildcard.as_raw_string()]: []
+		};
+	}
+	if(typeof obj === 'string' || obj instanceof RegExp) {
+		obj = [obj];
+	}
+	if(Array.isArray(obj)) {
+		obj = {
+			[quintet.wildcard.as_raw_string()]: obj
+		};
+	}
+	if(typeof obj === 'object') {
+		for(let prop in obj) {
+			try {
+				new quintet(prop);
+			} catch(e) {
+				obj = {
+					[quintet.wildcard.as_raw_string()]: [obj]
+				}
+				break;
+			}
+		}
+	}
+	for(let prop in obj) {
+		if(!Array.isArray(obj[prop])) {
+			obj[prop] = [obj[prop]];
+		}
+	}
+	return filtered_map.make<V>(obj);
+}
+
+@yas.serializable
+export class name_map extends Map<string, [string[], string[]]> {
+	constructor(...args: any) {
+		super(...args);
 	}
 }

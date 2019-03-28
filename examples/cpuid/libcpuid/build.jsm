@@ -6,11 +6,15 @@
 			"kind"            : "target",
 			"name"            : "libcpuid",
 			"type"            : "static",
-			"namespace"       : "cpuid",
-			"exported_headers": [
-				{ "include/cpuid/cpuid.hpp"   : "cpuid.hpp"   },
-				{ "include/cpuid/suffixes.hpp": "suffixes.hpp"}
-			],
+			"exports"         : {
+				"headers": [
+					{ "include/cpuid/cpuid.hpp"   : "cpuid/cpuid.hpp"   },
+					{ "include/cpuid/suffixes.hpp": "cpuid/suffixes.hpp"}
+				],
+				"defines": [],
+				"compiler_flags": [],
+				"linker_flags": []
+			},
 			"headers"         : "src/**/*.hpp",
 			"sources"         : {
 				"*:*:*:*:*": [

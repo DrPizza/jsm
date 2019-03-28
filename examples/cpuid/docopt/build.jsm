@@ -6,8 +6,12 @@
 			"kind"            : "target",
 			"name"            : "docopt",
 			"type"            : "static",
-			"namespace"       : "docopt",
-			"exported_headers": [ { "include/docopt/docopt.hpp": "docopt.hpp" } ],
+			"exports"         : {
+				"headers": [ { "include/docopt/docopt.hpp": "docopt/docopt.hpp" } ],
+				"defines": [],
+				"compiler_flags": [],
+				"linker_flags": []
+			},
 			"headers"         : ["src/**/*.hpp"],
 			"sources"         : ["src/**/*.cpp"],
 			"external_deps"   : {
