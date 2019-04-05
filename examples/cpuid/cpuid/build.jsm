@@ -16,7 +16,7 @@
 					{
 						"kind"     : "external",
 						"name"     : "boost-xpressive",
-						"version"  : "1.69.0",
+						"version"  : ">=1.69.0",
 						"type"     : "header-only",
 						"providers": "vcpkg"
 					}
@@ -28,7 +28,7 @@
 			"name"   : "cpuid-test",
 			"type"   : "executable",
 			"headers": [],
-			"srcs"   : ["test/**/*.cpp"],
+			"sources": ["test/**/*.cpp"],
 			"depends": [
 				"//cpuid:cpuid"
 			],
@@ -44,7 +44,7 @@
 					{
 						"kind"     : "external",
 						"name"     : "boost-xpressive",
-						"version"  : "1.69.0",
+						"version"  : ">=1.69.0",
 						"type"     : "header-only",
 						"providers": "vcpkg"
 					}

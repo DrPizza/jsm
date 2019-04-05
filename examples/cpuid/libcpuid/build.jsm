@@ -11,9 +11,9 @@
 					{ "include/cpuid/cpuid.hpp"   : "cpuid/cpuid.hpp"   },
 					{ "include/cpuid/suffixes.hpp": "cpuid/suffixes.hpp"}
 				],
-				"defines": [],
+				"defines"       : [],
 				"compiler_flags": [],
-				"linker_flags": []
+				"linker_flags"  : []
 			},
 			"headers"         : "src/**/*.hpp",
 			"sources"         : {
@@ -45,14 +45,14 @@
 					{
 						"kind"     : "external",
 						"name"     : "boost-xpressive",
-						"version"  : "1.69.0",
+						"version"  : ">=1.69.0",
 						"type"     : "header-only",
 						"providers": ["system", "vcpkg" ]
 					},
 					{
 						"kind"     : "external",
 						"name"     : "fmt",
-						"version"  : "5.3.0",
+						"version"  : ">=5.3.0",
 						"type"     : "static",
 						"providers": "*"
 					}
@@ -77,10 +77,10 @@
 				":libcpuid"
 			],
 			"external_deps": [ {
-				"kind"   : "external",
-				"name"   : "gtest",
-				"version": "2019-01-04-1",
-				"type"   : "static",
+				"kind"     : "external",
+				"name"     : "gtest",
+				"version"  : "2019-01-04-1",
+				"type"     : "static",
 				"providers": "vcpkg"
 			} ]
 		}

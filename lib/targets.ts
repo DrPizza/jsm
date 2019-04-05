@@ -1,12 +1,9 @@
-import * as path from 'path';
-
-import * as yas from './serializer';
 import * as fg from 'fast-glob';
 import * as mm from 'micromatch';
+import * as yas from './serializer';
 import logger from './logging';
 import { source_spec, target_reference, external_dependency, workspace, toolchain, file_pattern } from './jsm';
-import { filtered_map, wrap_in_filter, quintet, quintet_part, create_regular_object, name_map, label} from './core-types';
-import { build_tool, linker } from './tools';
+import { filtered_map, wrap_in_filter, quintet, quintet_part, create_regular_object, name_map, label, unique } from './core-types';
 import { build_step, copy_files_step, compile_files_step, link_objects_step, archive_objects_step } from './build-steps';
 
 export function calculate_renames(inputs: string[], mappings: name_map[]) {
@@ -86,6 +83,10 @@ export function calculate_renames(inputs: string[], mappings: name_map[]) {
 			});
 		});
 	});
+	outputs.forEach((pair: [string[], string[]]) => {
+		pair[0] = unique(pair[0].sort());
+		pair[1] = unique(pair[1].sort());
+	});
 	return outputs;
 }
 
@@ -93,9 +94,7 @@ function build_reverse_mapping(forward: name_map) {
 	let reverse = new name_map();
 	Array.from(forward.values()).forEach((values: [string[], string[]]) => {
 		values[1].forEach((output_name: string) => {
-			if(reverse.has(output_name)) {
-				reverse.get(output_name)![1].push(...values[0]);
-			} else {
+			if(!reverse.has(output_name)) {
 				reverse.set(output_name, [[output_name], values[0]]);
 			}
 		})
@@ -132,7 +131,8 @@ export class export_spec {
 
 @yas.serializable
 export abstract class target {
-	name     : label;
+	name          : string;
+	identifier    : label;
 
 	exports       : filtered_map<export_spec>;
 	headers       : filtered_map<string>;
@@ -157,7 +157,8 @@ export abstract class target {
 
 		Object.assign(options, spec);
 
-		this.name      = new label(options.name.indexOf(':') !== -1 ? options.name : ':' + options.name);
+		this.name            = options.name;
+		this.identifier      = new label(options.name.indexOf(':') !== -1 ? options.name : ':' + options.name);
 		
 		this.exports          = wrap_in_filter<string>(options.exports      ).transform_all_elements_sync(create_regular_object(export_spec        ));
 		this.headers          = wrap_in_filter<string>(options.headers      );
@@ -189,9 +190,9 @@ export abstract class target {
 		};
 		let tc = recurse(this.parent);
 		if(!tc) {
-			throw new Error(`no viable tolchain found for ${this.name} with target ${q}`)
+			throw new Error(`no viable tolchain found for ${this.identifier} with target ${q}`)
 		}
-		logger.verbose(`using ${tc.name} for ${this.name}`);
+		logger.verbose(`using ${tc.name} for ${this.identifier}`);
 		return tc;
 	}
 
@@ -209,16 +210,9 @@ export abstract class target {
 
 @yas.serializable
 export class header_only extends target {
-	defines: filtered_map<string>;
 
 	constructor(spec: any) {
 		super(spec);
-		var options = {
-			'defines': [] as any[]
-		};
-		Object.assign(options, spec);
-		
-		this.defines = wrap_in_filter<string>(options.defines);
 	}
 
 	get_specific_quintet(q: quintet) {
@@ -256,15 +250,18 @@ export class header_only extends target {
 @yas.serializable
 export abstract class compiled_target extends header_only {
 	compiler_flags: filtered_map<string>;
+	defines: filtered_map<string>;
 
 	constructor(spec: any) {
 		super(spec);
 		var options = {
-			compiler_flags: [] as any[]
+			'compiler_flags': [] as any[],
+			'defines': [] as any[]
 		}
 		Object.assign(options, spec);
 		
 		this.compiler_flags = wrap_in_filter<string>(options.compiler_flags)
+		this.defines = wrap_in_filter<string>(options.defines)
 	}
 
 	get_specific_quintet(q: quintet) {
@@ -464,7 +461,7 @@ export abstract class linked_target extends compiled_target {
 			}).flat()
 		}).flat();
 		
-		const basename = path.normalize(this.parent!.workspace_directory).replace(path.normalize(this.parent!.root_directory), '').replace(path.sep, '');
+		const basename = this.name;
 		outputs.forEach((ext: string) => {
 			const output_name = ext.replace('*', basename); // TODO use variables and substitution!
 			const entry = [objs, [output_name]] as [string[], string[]];
@@ -561,7 +558,7 @@ export class static_library extends compiled_target {
 			}).flat()
 		}).flat();
 		
-		const basename = path.normalize(this.parent!.workspace_directory).replace(path.normalize(this.parent!.root_directory), '').replace(path.sep, '');
+		const basename = this.name;
 		outputs.forEach((ext: string) => {
 			const output_name = ext.replace('*', basename); // TODO use variables and substitution!
 			const entry = [objs, [output_name]] as [string[], string[]];

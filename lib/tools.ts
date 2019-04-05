@@ -1,7 +1,7 @@
 import * as yas from './serializer';
+import logger from './logging';
 import { filtered_map, wrap_in_filter, quintet, name_map } from './core-types';
 import { calculate_renames } from './targets'
-import logger from './logging';
 
 @yas.serializable
 export class tool {

@@ -1,14 +1,13 @@
 import * as path from 'path';
 import * as util from 'util';
-
 import * as yas from './serializer';
 import { workspace, default_build_file_name } from './jsm';
 
 export function unique<T>(arr: T[], compare?: (a: T, b: T) => number, fuse?: (a: T, b: T) => T) : T[] {
 	compare = compare || function (l: T, r: T) {
 		return l < r ? -1
-			 : l > r ?  1
-			 :          0;
+		     : l > r ?  1
+		     :          0;
 	};
 	fuse = fuse || function(l: T, r: T) {
 		return l;
@@ -177,12 +176,12 @@ export class quintet {
 	}
 
 	@yas.serializer
-	static serialize(q: quintet) {
+	static serialize(q: quintet, deeper: (s: any) => any) {
 		return [ q.as_raw_string(), false];
 	}
 
 	@yas.deserializer
-	static deserialize(structured: quintet, destructured: any) {
+	static deserialize(structured: quintet, destructured: any, deeper: (s: any) => any) {
 		let q = new quintet(destructured as string);
 		structured.parts = q.parts;
 		return false;
@@ -198,12 +197,15 @@ export class filtered_map<V> extends Map<quintet, V[]> {
 			return [new quintet(value[0]), value[1]] as [quintet, V[]];
 		}));
 	}
+	
 	static merge<V>(a: filtered_map<V>, b: filtered_map<V>): filtered_map<V> {
 		return new filtered_map<V>(a.entries()).merge(b);
 	}
+	
 	constructor(...args: any) {
 		super(...args);
 	}
+	
 	merge(b: filtered_map<V>) {
 		let comparison = (l: [quintet, V[]], r: [quintet, V[]]): number => {
 			return quintet.compare(l[0], r[0]);
@@ -218,6 +220,7 @@ export class filtered_map<V> extends Map<quintet, V[]> {
 		});
 		return this;
 	}
+	
 	matching_elements(quin: quintet): V[] {
 		return Array.from(this.keys()).filter((pattern: quintet) => {
 			return quin.match(pattern);
@@ -225,6 +228,7 @@ export class filtered_map<V> extends Map<quintet, V[]> {
 			return this.get(value)!;
 		}).flat();
 	}
+	
 	async transform_matching_elements<U>(quin: quintet, fn: (elem: V) => Promise<U>) {
 		let updated = new filtered_map<U>();
 		await Promise.all(Array.from(this.keys()).filter((pattern: quintet) => {
@@ -235,9 +239,11 @@ export class filtered_map<V> extends Map<quintet, V[]> {
 		}));
 		return updated;
 	}
+	
 	async transform_all_elements<U>(fn: (elem: V) => Promise<U>) {
 		return await this.transform_matching_elements(quintet.wildcard, fn);
 	}
+	
 	transform_matching_elements_sync<U>(quin: quintet, fn: (elem: V) => U): filtered_map<U> {
 		let updated = new filtered_map<U>();
 		Array.from(this.keys()).filter((pattern: quintet) => {
@@ -248,6 +254,7 @@ export class filtered_map<V> extends Map<quintet, V[]> {
 		});
 		return updated;
 	}
+	
 	transform_all_elements_sync<U>(fn: (elem: V) => U): filtered_map<U> {
 		return this.transform_matching_elements_sync(quintet.wildcard, fn);
 	}
@@ -291,5 +298,20 @@ export function wrap_in_filter<V>(obj: any): filtered_map<V> {
 export class name_map extends Map<string, [string[], string[]]> {
 	constructor(...args: any) {
 		super(...args);
+	}
+	
+
+	@yas.serializer
+	static serialize(nm: name_map, deeper: (s: any) => any) {
+		return [ Array.from(nm.entries()), false];
+	}
+
+	@yas.deserializer
+	static deserialize(structured: name_map, destructured: any, deeper: (s: any) => any) {
+		let entries = destructured as [string, [string[], string[]]][];
+		entries.forEach((entry: [string, [string[], string[]]]) => {
+			structured.set(entry[0], entry[1]);
+		})
+		return false;
 	}
 }

@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as util from 'util';
 import * as worker from 'worker_threads';
 import * as os from 'os';
+import * as process from 'process';
 
 import * as yas from './serializer';
 import logger from './logging';
@@ -73,8 +74,55 @@ export class workspace {
 	
 		this.targets.matching_elements(quintet.wildcard).forEach((t: target) => {
 			t.parent = this;
-			t.name.make_absolute(this);
+			t.identifier.make_absolute(this);
 		});
+	}
+
+	resolve_property(property_name: string): any | undefined {
+		const first_dot = property_name.indexOf('.');
+		if(first_dot !== -1) {
+			const first_segment = property_name.substring(0, first_dot);
+			if(first_segment === 'env') {
+				const env_name = property_name.substring(first_dot + 2);
+				return process.env[env_name];
+			}
+		}
+		
+		const resolve = (root: any, path: string | string[]): any => {
+			if(!Array.isArray(path)) {
+				path = path.split('.');
+			}
+			let tail : string[] = [];
+			for(;;) {
+				if(Object.prototype.hasOwnProperty.call(root, path.join('.'))) {
+					root = root[path.join('.')];
+					if(tail.length > 0) {
+						return resolve(root, tail);
+					} else {
+						return root;
+					}
+				} else {
+					if(path.length > 0) {
+						tail.unshift(path.pop()!);
+					} else {
+						return undefined;
+					}
+				}
+			}
+		}
+		let result = resolve(this.properties, property_name);
+		if(result) {
+			return result;
+		} else if(this.parent) {
+			return this.parent.resolve_property(property_name);
+		} else {
+			return undefined;
+		}
+	}
+	
+	resolve_property_default(property_name: string, default_value: any) : any {
+		const result = this.resolve_property(property_name);
+		return result ? result : default_value;
 	}
 
 	calculate_default_target() {
@@ -159,7 +207,7 @@ export class workspace {
 		this.targets.matching_elements(root.target_quintet).map((t: target) => {
 			t.depends.matching_elements(root.target_quintet).map((r: target_reference) => {
 				const k = r.name.make_absolute(t.parent).toString();
-				logger.verbose(`${padding}${t.name} depends on ${k}`);
+				logger.verbose(`${padding}${t.identifier} depends on ${k}`);
 				if(root.known_targets.has(k)) {
 					logger.verbose(`${padding}    found suitable build target for ${k}`);
 					r.target = root.known_targets.get(k)!;
@@ -169,7 +217,7 @@ export class workspace {
 					}
 					root.edges.get(r.target)!.push(t);
 				} else {
-					throw new Error(`target ${t.name} depends on ${k} which could not be resolved`);
+					throw new Error(`target ${t.identifier} depends on ${k} which could not be resolved`);
 				}
 			});
 		});
@@ -184,7 +232,7 @@ export class workspace {
 		let collect_known_targets = function(ws: workspace) {
 			let targs = new Map<string, target>();
 			ws.targets.matching_elements(root.target_quintet).map((t: target) => {
-				targs.set(t.name.toString(), t);
+				targs.set(t.identifier.toString(), t);
 			});
 
 			ws.components.matching_elements(root.target_quintet).map((comp: workspace) => {
@@ -235,18 +283,12 @@ export class workspace {
 
 	resolve_all_external_dependencies(): void {
 		let host_env = {
-			lookup: (s: string, dflt?: string) => {
+			lookup: (s: string, dflt?: any) => {
 				switch(s) {
 				case 'target':
 					return this.target_quintet.as_raw_string();
 				default:
-					if(this.properties.hasOwnProperty(s)) {
-						return this.properties[s];
-					} else if(dflt) {
-						return dflt;
-					} else {
-						throw new Error(`could not find property ${s}`);
-					}
+					return this.resolve_property_default(s, dflt);
 				}
 			}
 		};
@@ -256,14 +298,14 @@ export class workspace {
 		const resolve_externals = function(ws: workspace, padding : string = '') {
 			ws.targets.matching_elements(root.target_quintet).map((t: target) => {
 				t.external_deps.matching_elements(root.target_quintet).map((e: external_dependency) => {
-					logger.verbose(`${padding}${t.name} depends on ${e.name}`);
+					logger.verbose(`${padding}${t.identifier} depends on ${e.name}`);
 					if(e.resolution === null) {
 						let provs = e.providers.matching_elements(root.target_quintet);
 						provs.map((p: string) => {
 							const key = `${p}::${e.name}::${e.version}`;
 							if(cache.has(key)) {
 								e.resolution = cache.get(key)!.resolution;
-								logger.verbose(`${padding}    ${key} for ${t.name} resolved from cache`);
+								logger.verbose(`${padding}    ${key} for ${t.identifier} resolved from cache`);
 							} else {
 								root.extensions.filter((ext: extension) => {
 									return ext instanceof package_manager && ext.is_applicable(root.target_quintet);
@@ -273,17 +315,18 @@ export class workspace {
 									if(!e.resolution && (pm.name == p || p == '*')) {
 										let resolution = pm.resolve(host_env, e, root.target_quintet);
 										if(resolution) {
-											logger.verbose(`${padding}    ${key} for ${t.name} resolved by ${pm.name}`);
+											logger.verbose(`${padding}    ${key} for ${t.identifier} resolved by ${pm.name}`);
+											logger.silly  (`${padding}    ${util.inspect(resolution)}`);
 											e.resolution = new external_resolution(resolution);
 										} else {
-											logger.warn(`${padding}    ${key} for ${t.name} not resolved by ${pm.name}`);
+											logger.warn(`${padding}    ${key} for ${t.identifier} not resolved by ${pm.name}`);
 										}
 									}
 								});
 								if(e.resolution) {
 									cache.set(key, e);
 								} else {
-									logger.warn(`${padding}    ${key} for ${t.name} was not fulfilled`);
+									logger.warn(`${padding}    ${key} for ${t.identifier} was not fulfilled`);
 								}
 							}
 						});
@@ -316,14 +359,14 @@ export class workspace {
 		const error_message = missing.filter((value: [workspace, target, external_dependency]) => {
 			return value[2].optional == false;
 		}).map((value: [workspace, target, external_dependency]) => {
-			return `${value[1].name} has unresolved required external dependency ${value[2].name}::${value[2].version}`
+			return `${value[1].identifier} has unresolved required external dependency ${value[2].name}::${value[2].version}`
 			     + ` from ${value[2].providers.matching_elements(root.target_quintet)}`;
 		}).join('\n');
 
 		const warning_message = missing.filter((value: [workspace, target, external_dependency]) => {
 			return value[2].optional == true;
 		}).map((value: [workspace, target, external_dependency]) => {
-			return `${value[1].name} has unresolved optional external dependency ${value[2].name}::${value[2].version}`
+			return `${value[1].identifier} has unresolved optional external dependency ${value[2].name}::${value[2].version}`
 			     + ` from ${value[2].providers.matching_elements(root.target_quintet)}`;
 		}).join('\n');
 
@@ -500,30 +543,30 @@ export class toolchain {
 			'name': '',
 			'quintets': [],
 
-			'compiler_name': '',
-			'compiler_flags': {},
-			'compiler_command': {},
-			'compiler_name_mapping': {},
-			'defines': [],
+			'compiler/cxx.name': '',
+			'compiler/cxx.flags': {},
+			'compiler/cxx.command': {},
+			'compiler/cxx.name_mapping': {},
+			'compiler/cxx.defines': [],
 
-			'linker_name': '',
-			'linker_flags': {},
-			'linker_command': {},
-			'linker_name_mapping': {},
+			'linker.name': '',
+			'linker.flags': {},
+			'linker.command': {},
+			'linker.name_mapping': {},
 
-			'archiver_name': '',
-			'archiver_flags': {},
-			'archiver_command': {},
-			'archiver_name_mapping': {},
+			'archiver.name': '',
+			'archiver.flags': {},
+			'archiver.command': {},
+			'archiver.name_mapping': {},
 		};
 		Object.assign(options, spec);
 
 		this.name     = options.name;
 		this.quintets = ((Array.isArray(options.quintets) ? options.quintets : [options.quintets]) as string[]).map((val: string) => new quintet(val)) ;
 
-		this.compiler = new compiler(options.compiler_name, options.compiler_flags, options.compiler_command, options.compiler_name_mapping, options.defines);
-		this.linker   = new linker  (options.linker_name  , options.linker_flags  , options.linker_command  , options.linker_name_mapping                   );
-		this.archiver = new archiver(options.archiver_name, options.archiver_flags, options.archiver_command, options.archiver_name_mapping                 );
+		this.compiler = new compiler(options['compiler/cxx.name'], options['compiler/cxx.flags'], options['compiler/cxx.command'], options['compiler/cxx.name_mapping'], options['compiler/cxx.defines']);
+		this.linker   = new linker  (options['linker.name'      ], options['linker.flags'      ], options['linker.command'      ], options['linker.name_mapping'      ]                                 );
+		this.archiver = new archiver(options['archiver.name'    ], options['archiver.flags'    ], options['archiver.command'    ], options['archiver.name_mapping'    ]                                 );
 	}
 
 	is_applicable(target_quintet: quintet) {
@@ -578,17 +621,17 @@ export class external_resolution {
 	constructor(spec: any) {
 		var options = {
 			header_dir: [],
-			lib_dir: [],
-			lib_files: [],
-			bin_dir: [],
-			bin_files: []
+			lib_dir   : [],
+			lib_files : [],
+			bin_dir   : [],
+			bin_files : []
 		};
 		Object.assign(options, spec);
 		this.header_dir = wrap_in_filter<string>(options.header_dir);
-		this.lib_dir = wrap_in_filter<string>(options.lib_dir);
-		this.lib_files = wrap_in_filter<string>(options.lib_files);
-		this.bin_dir = wrap_in_filter<string>(options.bin_dir);
-		this.bin_files = wrap_in_filter<string>(options.bin_files);
+		this.lib_dir    = wrap_in_filter<string>(options.lib_dir   );
+		this.lib_files  = wrap_in_filter<string>(options.lib_files );
+		this.bin_dir    = wrap_in_filter<string>(options.bin_dir   );
+		this.bin_files  = wrap_in_filter<string>(options.bin_files );
 	}
 }
 
@@ -660,7 +703,7 @@ export async function jsm(absolute_file_name: string, target?: string) {
 
 		ws.resolve_all_dependencies();
 		let build_order   = ws.determine_build_order();
-		logger.info(`build order: ${build_order.map(v => v.name.toString()).join(', ')}`);
+		logger.info(`build order: ${build_order.map(v => v.identifier.toString()).join(', ')}`);
 		let build_steps = ws.generate_build_steps();
 		
 		build_steps.forEach((steps: build_step[]) => {
@@ -670,7 +713,7 @@ export async function jsm(absolute_file_name: string, target?: string) {
 				const outputs = Array.from(step.outputs_to_inputs.keys()).join(', ');
 				console.log(`${step.constructor.name} converting ${inputs} to ${outputs}`);
 			});
-		})
+		});
 
 // console.log('after dependency resolution');
 // console.log(util.inspect(ws, true, 12, true));
@@ -679,6 +722,13 @@ export async function jsm(absolute_file_name: string, target?: string) {
 //console.log(util.inspect(build_steps, true, 4, true));
 //console.log(util.inspect(ws, true, 12, true));
 // console.log(ser.serialize(ws));
+console.log(util.inspect(ws.properties));
+console.log(ws.resolve_property('output.directory'));
+		
+		
+
+
+		
 		return ws;
 	} catch(e) {
 		logger.error(`exception: ${e}`);

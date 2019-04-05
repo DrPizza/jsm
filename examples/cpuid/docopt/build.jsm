@@ -26,7 +26,7 @@
 					{
 						"kind"     : "external",
 						"name"     : "boost-xpressive",
-						"version"  : "1.69.0",
+						"version"  : ">=1.69.0",
 						"type"     : "header-only",
 						"providers": "vcpkg"
 					}

@@ -2,3 +2,4 @@ node_modules/
 dist/
 examples/cpuid/jsm.log
 .vscode/ipch/
+jsm.log
